@@ -38,13 +38,16 @@ const CONFIG = {
   angerMax:              100,
   angerRates: { seekingSeat: 2.5, walkingToSeat: 1.0, waitingFood: 3.5, eating: 0 },
   employeeSpeed: 4.5,
-  startingMoney: 3000,
+  startingMoney: 200,
   costs: { stove: 150, table: 50, chair: 20, sink: 120, employee: 200 },
   refundRatio: 0.5,
   trafficLevels: [1, 2, 3, 5],
   speedLevels:   [1, 2, 4],
   tiredMult:     0.75,   // scales all stats (except STR) while a chef is tired
   tipRateBase:   0.15,   // baseline tip fraction of meal price at quality×cha = 1
+  dayBaseQuota:     4,   // day-1 customer quota
+  dayGrowthFactor:  1.5, // ceil(dayBaseQuota * factor^(day-1))
+  dayBreakDuration: 6,   // seconds of paused spawning between days
 };
 
 function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
@@ -74,8 +77,385 @@ function computeTip(customer) {
   const tipMult = 0.5 + (cha - 1) / 9;                // 0.5 .. 1.5
   const noise   = 1 + (Math.random() - 0.5) * 0.2;    // 0.9 .. 1.1
   const frac    = effQual * tipMult * CONFIG.tipRateBase;
-  return Math.max(0, Math.round(price * frac * noise));
+  let tip = Math.max(0, Math.round(price * frac * noise));
+  // Ability tip multipliers — cook-side (e.g. Showstopper) and customer-side
+  // (e.g. Big Tipper) stack multiplicatively.
+  if (cook) tip = tip * abilityMult(cook, 'tipMult');
+  tip = tip * abilityMult(customer, 'tipMult');
+  // Status bonus: a starstruck chef tips 25% more next day.
+  if (cook && cook.status && cook.status.kind === 'starstruck') tip = tip * 1.25;
+  return Math.round(tip);
 }
+
+/* ---- Ability system -------------------------------------------------------- */
+// Abilities are referenced by string key on a preset's `abilities` array and
+// resolved via ABILITIES[key] at call sites. Each ability may declare:
+//   - Multiplier hooks (combined multiplicatively via abilityMult):
+//       cookTimeMult(foodKey)   — chef-side, scales cook duration
+//       eatTimeMult(foodKey)    — customer-side, scales eat duration
+//       tipMult()               — either side, scales tip payout
+//       angerMult(stateKey)     — customer-side, scales anger rate
+//   - Additive hooks (summed via abilitySum):
+//       extraOrders()           — customer-side, number of additional courses
+//   - Event hooks fired at specific moments (no return value):
+//       onCookStart(ctx), onCookComplete(ctx), onOrderPlaced(ctx),
+//       onEat(ctx), onLeave(ctx)
+//     ctx is {sim, entity, ability, foodKey?}. Hooks typically fire popups via
+//     sim.emitPopup(entity, icon, label).
+const ABILITIES = {
+  // ---- Chef abilities ----
+  knife_skills: {
+    id: 'knife_skills', kind: 'chef', name: 'Knife Skills', icon: '🔪',
+    description: 'Burgers cook 35% faster.',
+    cookTimeMult: (foodKey) => foodKey === 'BURGER' ? 0.65 : 1,
+    onCookStart: (ctx) => { if (ctx.foodKey === 'BURGER') ctx.sim.emitPopup(ctx.entity, '🔪', 'Knife Skills'); },
+  },
+  pizza_master: {
+    id: 'pizza_master', kind: 'chef', name: 'Pizza Master', icon: '🍕',
+    description: 'Pizzas cook 40% faster.',
+    cookTimeMult: (foodKey) => foodKey === 'PIZZA' ? 0.60 : 1,
+    onCookStart: (ctx) => { if (ctx.foodKey === 'PIZZA') ctx.sim.emitPopup(ctx.entity, '🍕', 'Pizza Master'); },
+  },
+  soup_savant: {
+    id: 'soup_savant', kind: 'chef', name: 'Soup Savant', icon: '🥄',
+    description: 'Soups cook 45% faster.',
+    cookTimeMult: (foodKey) => foodKey === 'SOUP' ? 0.55 : 1,
+    onCookStart: (ctx) => { if (ctx.foodKey === 'SOUP') ctx.sim.emitPopup(ctx.entity, '🥄', 'Soup Savant'); },
+  },
+  green_thumb: {
+    id: 'green_thumb', kind: 'chef', name: 'Green Thumb', icon: '🥗',
+    description: 'Salads cook 50% faster.',
+    cookTimeMult: (foodKey) => foodKey === 'SALAD' ? 0.50 : 1,
+    onCookStart: (ctx) => { if (ctx.foodKey === 'SALAD') ctx.sim.emitPopup(ctx.entity, '🥗', 'Green Thumb'); },
+  },
+  fast_hands: {
+    id: 'fast_hands', kind: 'chef', name: 'Fast Hands', icon: '⚡',
+    description: 'Every dish cooks 15% faster.',
+    cookTimeMult: () => 0.85,
+    onCookStart: (ctx) => ctx.sim.emitPopup(ctx.entity, '⚡', 'Fast Hands'),
+  },
+  showstopper: {
+    id: 'showstopper', kind: 'chef', name: 'Showstopper', icon: '✨',
+    description: 'Every plate this chef serves tips 40% more.',
+    tipMult: () => 1.4,
+  },
+  perfectionist: {
+    id: 'perfectionist', kind: 'chef', name: 'Perfectionist', icon: '💎',
+    description: 'Dishes take 20% longer but tip 60% more.',
+    cookTimeMult: () => 1.20,
+    tipMult: () => 1.60,
+    onCookStart: (ctx) => ctx.sim.emitPopup(ctx.entity, '💎', 'Perfecting…'),
+  },
+  burger_boss: {
+    id: 'burger_boss', kind: 'chef', name: 'Burger Boss', icon: '🍔',
+    description: 'Burgers cook 50% faster and tip 25% more when this chef cooks them.',
+    cookTimeMult: (foodKey) => foodKey === 'BURGER' ? 0.50 : 1,
+    tipMult:      () => 1.25,
+    onCookStart:  (ctx) => { if (ctx.foodKey === 'BURGER') ctx.sim.emitPopup(ctx.entity, '🍔', 'Burger Boss'); },
+  },
+  mentor: {
+    id: 'mentor', kind: 'chef', name: 'Mentor', icon: '📖',
+    description: 'Flavorful, patient cooking. Dishes take 10% longer but all plates tip 20% more.',
+    cookTimeMult: () => 1.10,
+    tipMult:      () => 1.20,
+  },
+  eager_intern: {
+    id: 'eager_intern', kind: 'chef', name: 'Eager Intern', icon: '🥴',
+    description: 'Means well. 20% chance to burn the dish, 30% chance to cook it in half the time.',
+    cookTimeMult: () => {
+      const r = Math.random();
+      if (r < 0.20) return 1.80;
+      if (r < 0.50) return 0.50;
+      return 1.0;
+    },
+    onCookStart: (ctx) => ctx.sim.emitPopup(ctx.entity, '🥴', 'Trying…'),
+  },
+  road_runner: {
+    id: 'road_runner', kind: 'chef', name: 'Road Runner', icon: '🏁',
+    description: 'All dishes cook 25% faster.',
+    cookTimeMult: () => 0.75,
+    onCookStart: (ctx) => ctx.sim.emitPopup(ctx.entity, '🏁', 'Road Runner'),
+  },
+
+  // ---- Customer abilities ----
+  big_appetite: {
+    id: 'big_appetite', kind: 'customer', name: 'Big Appetite', icon: '🍴',
+    description: 'Orders two dishes before leaving.',
+    extraOrders: () => 1,
+    onEnter: (ctx) => ctx.sim.emitPopup(ctx.entity, '🍴', 'Big Appetite'),
+  },
+  slow_eater: {
+    id: 'slow_eater', kind: 'customer', name: 'Slow Eater', icon: '🐢',
+    description: 'Takes 75% longer to eat.',
+    eatTimeMult: () => 1.75,
+    onEnter: (ctx) => ctx.sim.emitPopup(ctx.entity, '🐢', 'Slow Eater'),
+  },
+  big_tipper: {
+    id: 'big_tipper', kind: 'customer', name: 'Big Tipper', icon: '💵',
+    description: 'Tips double.',
+    tipMult: () => 2.0,
+    onEnter: (ctx) => ctx.sim.emitPopup(ctx.entity, '💵', 'Big Tipper'),
+  },
+  picky: {
+    id: 'picky', kind: 'customer', name: 'Picky', icon: '😤',
+    description: 'Grows angry 50% faster while waiting for food.',
+    angerMult: (stateKey) => stateKey === 'waitingFood' ? 1.5 : 1,
+    onEnter: (ctx) => ctx.sim.emitPopup(ctx.entity, '😤', 'Picky'),
+  },
+  patient: {
+    id: 'patient', kind: 'customer', name: 'Patient', icon: '😌',
+    description: 'Gains anger 40% more slowly.',
+    angerMult: () => 0.6,
+    onEnter: (ctx) => ctx.sim.emitPopup(ctx.entity, '😌', 'Patient'),
+  },
+};
+
+// Odds table for random customer abilities. Rolled per customer; may yield none.
+const CUSTOMER_ABILITY_ROLL = [
+  { id: 'big_appetite', weight: 1.0 },
+  { id: 'slow_eater',   weight: 1.0 },
+  { id: 'big_tipper',   weight: 1.0 },
+  { id: 'picky',        weight: 1.2 },
+  { id: 'patient',      weight: 0.8 },
+];
+
+function abilitiesOf(entity) {
+  const ids = entity && entity.abilities;
+  if (!ids || !ids.length) return [];
+  const out = [];
+  for (const id of ids) { const a = ABILITIES[id]; if (a) out.push(a); }
+  return out;
+}
+function abilityMult(entity, prop, ...args) {
+  let m = 1;
+  for (const a of abilitiesOf(entity)) {
+    const fn = a[prop]; if (typeof fn === 'function') m *= fn(...args);
+  }
+  return m;
+}
+function abilitySum(entity, prop, ...args) {
+  let s = 0;
+  for (const a of abilitiesOf(entity)) {
+    const fn = a[prop]; if (typeof fn === 'function') s += fn(...args);
+  }
+  return s;
+}
+function fireAbilityHook(entity, hookName, ctx) {
+  for (const a of abilitiesOf(entity)) {
+    const fn = a[hookName];
+    if (typeof fn === 'function') fn({ ...ctx, entity, ability: a });
+  }
+}
+/* ---- Between-day events ---------------------------------------------------- */
+// Each event is resolved by assigning one hired chef. The chef rolls 1d10 +
+// their relevant stat against the event's DC. Pass → reward, fail → penalty.
+// The assigned chef always gets `statusOnAssign` applied on day start (the
+// starter chef is immune to `kind: 'busy'`). Some events apply a forecast
+// profile that shapes the NEXT day (food bias, volume, tip mult).
+//
+// Shape of each effect returned from onPass/onFail:
+//   { deltaMoney?: number, profile?: {...}, statusOverride?: {...}, msg: string }
+// msg is the terse headline shown inline in the modal after resolution.
+const EVENTS = [
+  {
+    id: 'burglar', icon: '🦹', title: 'Masked Burglar',
+    flavor: 'A hooded figure rattles the back door after close.',
+    stat: 'str', statLabel: 'STR',
+    dc: (day) => 5 + Math.min(day, 7),
+    onPass: (sim, chef) => ({
+      deltaMoney: 0,
+      msg: `${chef.name} scared them off. Safe.`,
+    }),
+    onFail: (sim, chef) => {
+      const today = Math.max(0, sim.money - sim.dayStartMoney);
+      const loss  = Math.floor(today * 0.5);
+      sim.money   = Math.max(0, sim.money - loss);
+      return { deltaMoney: -loss, msg: `They got in. Lost $${loss}.` };
+    },
+  },
+  {
+    id: 'drunk_brawl', icon: '🥊', title: 'Table 3 Brawl',
+    flavor: 'Two regulars start throwing punches over the salt.',
+    stat: 'str', statLabel: 'STR',
+    dc: (day) => 4 + Math.min(day, 6),
+    onPass: (sim, chef) => {
+      const bonus = 30 + 5 * chef.effStat('cha');
+      sim.money += bonus;
+      return { deltaMoney: bonus, msg: `Broken up. Grateful table tipped $${bonus}.` };
+    },
+    onFail: (sim, chef) => {
+      sim.money = Math.max(0, sim.money - 40);
+      return { deltaMoney: -40, msg: `Furniture smashed. Repairs cost $40.` };
+    },
+  },
+  {
+    id: 'health_inspector', icon: '📋', title: 'Health Inspector',
+    flavor: 'Clipboard. Gloves. No smile.',
+    stat: 'int', statLabel: 'INT',
+    dc: (day) => 5 + Math.min(day, 7),
+    onPass: (sim, chef) => ({
+      profile: { tipMult: 1.10, label: 'A-grade boosts tips +10% tomorrow' },
+      msg: `A-grade. Tomorrow tips +10%.`,
+    }),
+    onFail: (sim, chef) => {
+      sim.money = Math.max(0, sim.money - 100);
+      return {
+        deltaMoney: -100,
+        statusOverride: { kind: 'stressed', daysLeft: 1 },
+        msg: `$100 fine. ${chef.name} stressed tomorrow.`,
+      };
+    },
+  },
+  {
+    id: 'rodent_sighting', icon: '🐀', title: 'Rodent Sighting',
+    flavor: 'Something moved by the walk-in.',
+    stat: 'int', statLabel: 'INT',
+    dc: (day) => 4 + Math.min(day, 6),
+    onPass: (sim, chef) => ({ msg: `Trapped it in time. No loss.` }),
+    onFail: (sim, chef) => ({
+      profile: { tipMult: 0.9, label: 'Rumors spread — tips −10% tomorrow' },
+      msg: `Whispers spread. Tomorrow tips −10%.`,
+    }),
+  },
+  {
+    id: 'food_critic', icon: '📝', title: 'Food Critic',
+    flavor: 'Table 4 is scribbling in a notebook.',
+    stat: 'int', statLabel: 'INT',
+    dc: (day) => 6 + Math.min(day, 7),
+    onPass: (sim, chef) => {
+      sim.money += 200;
+      return { deltaMoney: 200, msg: `Rave review! +$200.` };
+    },
+    onFail: (sim, chef) => ({
+      profile: { quotaMult: 0.8, label: 'Slow reviews — fewer customers tomorrow' },
+      msg: `Lukewarm review. Fewer customers tomorrow.`,
+    }),
+  },
+  {
+    id: 'supply_late', icon: '🚚', title: 'Supply Truck Late',
+    flavor: 'Truck broke down on the interstate.',
+    stat: 'dex', statLabel: 'DEX',
+    dc: (day) => 5 + Math.min(day, 6),
+    onPass: (sim, chef) => ({ msg: `Improvised perfectly. Stock intact.` }),
+    onFail: (sim, chef) => {
+      sim.money = Math.max(0, sim.money - 60);
+      return { deltaMoney: -60, msg: `Emergency restock. −$60.` };
+    },
+  },
+  {
+    id: 'power_flicker', icon: '💡', title: 'Power Flicker',
+    flavor: 'The lights blink twice, then stay.',
+    stat: 'dex', statLabel: 'DEX',
+    dc: (day) => 4 + Math.min(day, 6),
+    onPass: (sim, chef) => ({ msg: `Breakers reset. All clear.` }),
+    onFail: (sim, chef) => ({
+      profile: { cookTimeMult: 1.4, label: 'Brownout — stoves slow 40% tomorrow' },
+      msg: `Half the stoves flaky tomorrow.`,
+    }),
+  },
+  {
+    id: 'rival_poach', icon: '💼', title: 'Rival Scout',
+    flavor: 'A scout leaves a business card on a chef\'s station.',
+    stat: 'cha', statLabel: 'CHA',
+    dc: (day) => 5 + Math.min(day, 6),
+    onPass: (sim, chef) => ({
+      statusOverride: { kind: 'starstruck', daysLeft: 1 },
+      msg: `${chef.name} charmed the scout. Starstruck tomorrow.`,
+    }),
+    onFail: (sim, chef) => {
+      sim.money = Math.max(0, sim.money - 150);
+      return { deltaMoney: -150, msg: `Counter-offer to retain ${chef.name}. −$150.` };
+    },
+  },
+  {
+    id: 'celebrity', icon: '🕶️', title: 'Celebrity Visit',
+    flavor: 'Sunglasses indoors, at 9pm.',
+    stat: 'cha', statLabel: 'CHA',
+    dc: (day) => 6 + Math.min(day, 7),
+    onPass: (sim, chef) => ({
+      profile: { tipMult: 1.5, label: 'Viral post — tips +50% tomorrow' },
+      statusOverride: { kind: 'starstruck', daysLeft: 1 },
+      msg: `Viral post incoming. Tips +50% tomorrow!`,
+    }),
+    onFail: (sim, chef) => ({
+      profile: { tipMult: 0.8, label: 'Bad post — tips −20% tomorrow' },
+      msg: `They posted the bad plate. Tips −20% tomorrow.`,
+    }),
+  },
+  {
+    id: 'party_booking', icon: '🎉', title: 'Birthday Booking',
+    flavor: 'A party wants the back room tomorrow night.',
+    stat: 'cha', statLabel: 'CHA',
+    dc: (day) => 5 + Math.min(day, 6),
+    onPass: (sim, chef) => ({
+      profile: { quotaMult: 1.5, tipMult: 1.15, label: 'Big party tomorrow — +50% customers, +15% tips' },
+      msg: `Booked! Big crowd tomorrow.`,
+    }),
+    onFail: (sim, chef) => {
+      sim.money = Math.max(0, sim.money - 80);
+      return { deltaMoney: -80, msg: `They walked. Refund $80.` };
+    },
+  },
+  {
+    id: 'rush_order', icon: '🛵', title: 'Rush Delivery',
+    flavor: 'A courier whale needs 15 covers, yesterday.',
+    stat: 'spd', statLabel: 'SPD',
+    dc: (day) => 5 + Math.min(day, 7),
+    onPass: (sim, chef) => {
+      sim.money += 60;
+      return { deltaMoney: 60, msg: `Out the door on time. +$60.` };
+    },
+    onFail: (sim, chef) => {
+      sim.money = Math.max(0, sim.money - 40);
+      return { deltaMoney: -40, msg: `Missed the window. Refund $40.` };
+    },
+  },
+  {
+    id: 'pipe_leak', icon: '🚰', title: 'Pipe Leak',
+    flavor: 'Water pooling under the sink.',
+    stat: 'spd', statLabel: 'SPD',
+    dc: (day) => 4 + Math.min(day, 6),
+    onPass: (sim, chef) => ({ msg: `Caught it fast. No damage.` }),
+    onFail: (sim, chef) => {
+      sim.money = Math.max(0, sim.money - 70);
+      return { deltaMoney: -70, msg: `Plumber bill. −$70.` };
+    },
+  },
+];
+
+function rollDailyEvent(day) {
+  return EVENTS[(Math.random() * EVENTS.length) | 0];
+}
+
+// Fresh forecast used when an event does not set its own profile. Keeps
+// tomorrow's shape interesting even on quiet events.
+const FORECASTS = [
+  { label: 'Pizza crowd tomorrow',          profile: { foodBias: 'PIZZA' } },
+  { label: 'Burger fans in town tomorrow',  profile: { foodBias: 'BURGER' } },
+  { label: 'Salad Tuesday — healthy crowd', profile: { foodBias: 'SALAD' } },
+  { label: 'Soup weather expected',         profile: { foodBias: 'SOUP' } },
+  { label: 'Generous tippers tomorrow',     profile: { tipMult: 1.2 } },
+  { label: 'Tightwads in tomorrow',         profile: { tipMult: 0.85 } },
+  { label: 'Big crowd tomorrow',            profile: { quotaMult: 1.35 } },
+  { label: 'Slow morning tomorrow',         profile: { quotaMult: 0.8 } },
+  { label: 'Nothing unusual on the books',  profile: {} },
+];
+function rollBaseForecast() {
+  return FORECASTS[(Math.random() * FORECASTS.length) | 0];
+}
+
+// Picks at most one ability per customer. ~55% have no ability, else weighted.
+function rollCustomerAbilities() {
+  if (Math.random() < 0.55) return [];
+  const total = CUSTOMER_ABILITY_ROLL.reduce((s, e) => s + e.weight, 0);
+  let r = Math.random() * total;
+  for (const entry of CUSTOMER_ABILITY_ROLL) {
+    r -= entry.weight;
+    if (r <= 0) return [entry.id];
+  }
+  return [];
+}
+
 
 /* ---- Chef presets ---------------------------------------------------------- */
 // Starter chefs seeded at game start. Skin tone is randomized from SKIN_TONES
@@ -86,6 +466,8 @@ const STARTER_CHEF = {
   dex: 5, spd: 5, str: 5, int: 5, cha: 5,
   visual: { hat: 0, hasHair: false },   // skinColor filled in at construction
   cost: 0,
+  abilities: [],
+  isStarter: true,        // immune to disabling statuses from events
 };
 
 // Fixed roster of 10 hireable chefs. Each can only be hired once; the pool
@@ -93,44 +475,54 @@ const STARTER_CHEF = {
 // Phaser-free / sprites-free.
 const CHEF_ROSTER = [
   { name: 'Marco "The Knife" Ferraro',
-    bio:  'twenty years in a Naples kitchen. does not smile.',
+    bio:  'twenty years in a Naples kitchen. does not smile. the blade is an extension of his hand, and burgers are his specialty.',
     dex: 9, spd: 5, str: 4, int: 7, cha: 2,
+    abilities: ['knife_skills', 'pizza_master'],
     visual: { skinColor: 0xe8a777, hairColor: 0x3a2a1a, hasHair: true,  hat: 0 } },
   { name: 'Sunny Oduya',
-    bio:  'brightest personality. burns the soup sometimes.',
+    bio:  'brightest personality in the building. burns the soup sometimes, but nobody minds because they are tipping double by the time they leave.',
     dex: 4, spd: 7, str: 6, int: 3, cha: 10,
+    abilities: ['showstopper'],
     visual: { skinColor: 0x8b5a3a, hairColor: 0x1a1a1a, hasHair: false, hat: 3 } },
   { name: 'Nana Beatrice',
-    bio:  'retired. unretired. cooks like she raised you.',
+    bio:  'retired. unretired. cooks like she raised you. her soups arrive faster than you can say grace, and every table feels the warmth.',
     dex: 6, spd: 2, str: 8, int: 9, cha: 8,
+    abilities: ['soup_savant', 'mentor'],
     visual: { skinColor: 0xfde5c8, hairColor: 0xe0d0b0, hasHair: true,  hat: 0 } },
   { name: 'Yuki Tanaka',
-    bio:  'silent, surgical. the plates come out clean.',
+    bio:  'silent, surgical. the plates come out clean and the cuts come out perfect. a quiet perfectionist who will not serve second best.',
     dex: 10, spd: 6, str: 3, int: 8, cha: 3,
+    abilities: ['perfectionist'],
     visual: { skinColor: 0xfec9a7, hairColor: 0x1a1a1a, hasHair: true,  hat: 1 } },
   { name: 'Big Tommy',
-    bio:  'can flip burgers with one hand. will.',
+    bio:  'can flip burgers with one hand. will. the patty is in the air before you finish ordering, and the tip always reflects it.',
     dex: 4, spd: 3, str: 10, int: 4, cha: 6,
+    abilities: ['burger_boss'],
     visual: { skinColor: 0xc68a5a, hairColor: 0x8a6a3a, hasHair: true,  hat: 3 } },
   { name: 'Priya Raval',
-    bio:  'trained in three Michelin kitchens. networks constantly.',
+    bio:  'trained in three Michelin kitchens. networks constantly. every plate is a performance, and diners lean in their chairs as she passes.',
     dex: 7, spd: 6, str: 5, int: 8, cha: 9,
+    abilities: ['showstopper', 'green_thumb'],
     visual: { skinColor: 0xc68a5a, hairColor: 0x1a1a1a, hasHair: true,  hat: 0 } },
   { name: 'Colt "Speed" Jensen',
-    bio:  'used to race. cooks like it too.',
+    bio:  'used to race. cooks like it too. every ticket is a lap and every stove is a pit. if you want it fast, he is your man.',
     dex: 5, spd: 10, str: 4, int: 3, cha: 7,
+    abilities: ['road_runner', 'fast_hands'],
     visual: { skinColor: 0xfec9a7, hairColor: 0xbd9a5a, hasHair: true,  hat: 4 } },
   { name: 'Wanda Kowalski',
-    bio:  'balanced. reliable. brought her own knives.',
+    bio:  'balanced. reliable. brought her own knives. never spectacular but never a weak shift either. the kitchen runs smoother when she is in it.',
     dex: 6, spd: 6, str: 6, int: 6, cha: 6,
+    abilities: ['fast_hands'],
     visual: { skinColor: 0xe8a777, hairColor: 0xc94a2a, hasHair: true,  hat: 0 } },
   { name: 'Gus the Intern',
-    bio:  'he is trying his best. please be kind.',
+    bio:  'he is trying his best. please be kind. sometimes he cooks a dish in half the time; sometimes he burns it outright. unpredictable but cheap.',
     dex: 3, spd: 4, str: 3, int: 3, cha: 8,
+    abilities: ['eager_intern'],
     visual: { skinColor: 0xfde5c8, hairColor: 0x3a2a1a, hasHair: true,  hat: 0 } },
   { name: 'Chef Blaise',
-    bio:  'the old master. slow moving, genius on the stove.',
+    bio:  'the old master. slow moving, genius on the stove. every dish is a small study, and the tips reflect the depth of his craft.',
     dex: 8, spd: 2, str: 6, int: 10, cha: 7,
+    abilities: ['perfectionist', 'mentor'],
     visual: { skinColor: 0xe8a777, hairColor: 0xe0d0b0, hasHair: true,  hat: 2 } },
 ];
 // Derive each chef's cost from total stats: baseline 5×5 = 25 → $150,
@@ -234,14 +626,16 @@ class Stove extends Building {
   constructor() { super('stove'); this.cooking = null; this.reservedFor = null; }
   isCooking()    { return this.cooking !== null; }
   isAvailable()  { return !this.cooking && !this.reservedFor; }
-  startCooking(order) {
+  startCooking(order, sim) {
     const food = FOODS[order.foodType];
     // Cook stats (via effStat so tiredness folds in automatically):
     //   DEX scales cookTime down, INT drives food quality at cook time.
     const cook = order.cookingEmployee;
     const dex  = cook ? cook.effStat('dex') : 5;
     const mult = clamp(1.3 - 0.06 * dex, 0.5, 1.3);
-    const cookTime = food.cookTime * mult;
+    const aMult = cook ? abilityMult(cook, 'cookTimeMult', order.foodType) : 1;
+    const profMult = (sim && sim.todayProfile && sim.todayProfile.cookTimeMult) || 1;
+    const cookTime = food.cookTime * mult * aMult * profMult;
     const quality  = cook ? computeQuality(cook.effStat('int')) : 1.0;
     this.cooking = { order, timeLeft: cookTime, total: cookTime, quality };
     this.reservedFor = null;
@@ -384,6 +778,13 @@ class Customer extends Entity {
     this.deliveredBy = null;
     this.tipAwarded  = 0;
 
+    // Ability system. Filled in by sim.spawnCustomer right after construction
+    // so the constructor stays side-effect free; defaults cover anything that
+    // bypasses spawnCustomer.
+    this.abilities       = [];
+    this.ordersRemaining = 1;
+    this.abilityAnnounced = false;
+
     // Visual randomization — palettes live in sprites.js. Read by SPRITES,
     // never mutated during play.
     const pick = (a) => a[(Math.random() * a.length) | 0];
@@ -400,11 +801,12 @@ class Customer extends Entity {
     const arrived = this.stepMovement(dt);
 
     // Anger ticks by state.
-    let rate = 0;
-    if (this.state === CS.ENTERING || this.state === CS.SEEKING) rate = CONFIG.angerRates.seekingSeat;
-    else if (this.state === CS.WALKING) rate = CONFIG.angerRates.walkingToSeat;
-    else if (this.state === CS.WAITING) rate = CONFIG.angerRates.waitingFood;
-    else if (this.state === CS.EATING)  rate = CONFIG.angerRates.eating;
+    let rate = 0; let stateKey = null;
+    if (this.state === CS.ENTERING || this.state === CS.SEEKING) { rate = CONFIG.angerRates.seekingSeat; stateKey = 'seekingSeat'; }
+    else if (this.state === CS.WALKING) { rate = CONFIG.angerRates.walkingToSeat; stateKey = 'walkingToSeat'; }
+    else if (this.state === CS.WAITING) { rate = CONFIG.angerRates.waitingFood;   stateKey = 'waitingFood'; }
+    else if (this.state === CS.EATING)  { rate = CONFIG.angerRates.eating;        stateKey = 'eating'; }
+    rate *= abilityMult(this, 'angerMult', stateKey);
     this.anger = Math.min(CONFIG.angerMax, this.anger + rate * dt);
     if (this.anger >= CONFIG.angerMax && this.state !== CS.LEAVING) { this.leave(sim, 'angry'); return; }
 
@@ -444,25 +846,74 @@ class Customer extends Entity {
           this.seatedAt = sim.time;
           this.order = new Order(this, this.foodPref);
           sim.submitOrder(this.order);
+          // Announce ability once the customer is visibly seated, not the
+          // moment they spawn off-screen.
+          if (!this.abilityAnnounced) {
+            fireAbilityHook(this, 'onEnter', { sim });
+            this.abilityAnnounced = true;
+          }
         }
         break;
       case CS.WAITING:
         if (this.table && this.table.plate && !this.table.plate.dirty &&
             this.table.plate.foodType === this.foodPref) {
           this.state = CS.EATING;
-          this.eatTimer = CONFIG.eatDuration;
+          this.eatTimer = CONFIG.eatDuration * abilityMult(this, 'eatTimeMult', this.foodPref);
+          fireAbilityHook(this, 'onEat', { sim, foodKey: this.foodPref });
         }
         break;
       case CS.EATING:
         this.eatTimer -= dt;
         if (this.eatTimer <= 0) {
           if (this.table && this.table.plate) this.table.plate.dirty = true;
-          this.leave(sim, 'happy');
+          this._consumePlate(sim);
         }
         break;
       case CS.LEAVING:
         if (arrived || !this.hasPath()) this.alive = false;
         break;
+    }
+  }
+
+  // Called when one course finishes. Credits price + tip now rather than at
+  // leave, so a multi-order customer earns per-course instead of lump-sum. If
+  // more orders remain, rolls a fresh foodPref and re-enters WAITING with a
+  // new Order; the dirty plate is cleared by the standard wash flow (or
+  // overwritten by the next delivery).
+  _consumePlate(sim) {
+    const price = FOODS[this.foodPref].price;
+    let tip     = computeTip(this);
+    // Today's forecast-driven tip multiplier (e.g. "generous tippers").
+    if (sim.todayProfile && sim.todayProfile.tipMult) {
+      tip = Math.round(tip * sim.todayProfile.tipMult);
+    }
+    this.tipAwarded += tip;
+    sim.money       += price + tip;
+    sim.stats.tipsTotal += tip;
+    sim.stats.served++;
+    // Credit the delivering chef's end-of-day report (career + today).
+    const cook = this.deliveredBy;
+    if (cook) {
+      cook.dayStats.dishes++;     cook.career.dishes++;
+      cook.dayStats.tipsEarned += tip;
+      cook.career.tipsEarned   += tip;
+    }
+    sim.emitPopup(this, '💰', `+$${price + tip}`);
+
+    this.ordersRemaining--;
+    if (this.ordersRemaining > 0) {
+      // Re-enter WAITING with a fresh order. Randomize foodPref so the second
+      // course isn't a guaranteed duplicate.
+      this.state = CS.WAITING;
+      this.foodPref = FOOD_KEYS[(Math.random() * FOOD_KEYS.length) | 0];
+      this.order = new Order(this, this.foodPref);
+      this.seatedAt    = sim.time;
+      this.deliveredAt = null;
+      this.deliveredBy = null;
+      sim.submitOrder(this.order);
+      sim.emitPopup(this, '🍴', 'Another, please');
+    } else {
+      this.leave(sim, 'happy');
     }
   }
 
@@ -505,16 +956,9 @@ class Customer extends Entity {
       if (o.readyStove) o.readyStove = null;
     }
 
-    if (reason === 'happy') {
-      sim.stats.served++;
-      const price = FOODS[this.foodPref].price;
-      const tip   = computeTip(this);
-      this.tipAwarded = tip;
-      sim.money += price + tip;
-      sim.stats.tipsTotal += tip;
-    } else {
-      sim.stats.angry++;
-    }
+    if (reason !== 'happy') sim.stats.angry++;
+    // Happy-path earnings are credited per course in _consumePlate; nothing
+    // else to do here beyond the state transition and exit path.
 
     // Queue-giver-upper: off-grid, just storm west.
     if (this.x < 0) { this.setPath([{ x: -5, y: this.y }]); return; }
@@ -553,6 +997,7 @@ class Employee extends Entity {
     this.str  = preset.str;
     this.int  = preset.int;
     this.cha  = preset.cha;
+    this.abilities = (preset.abilities || []).slice();
 
     // Visuals: prefer preset values; fall back to random SKIN_TONES pick so
     // two starter chefs don't look identical.
@@ -576,12 +1021,25 @@ class Employee extends Entity {
 
     // Speed is recomputed per-frame in update() so tiredness is responsive.
     this.speed = CONFIG.employeeSpeed * (0.7 + 0.06 * this.spd);
+
+    // End-of-day report tracking. dayStats resets at day boundary; career
+    // accumulates for the run. Status is an event-driven effect on next
+    // day's availability / behavior (e.g. {kind:'busy', daysLeft:1}).
+    this.isStarter = !!preset.isStarter;
+    this.dayStats  = { dishes: 0, tipsEarned: 0, timesTired: 0, procs: 0 };
+    this.career    = { dishes: 0, tipsEarned: 0, timesTired: 0, procs: 0, daysWorked: 0 };
+    this.status    = null;
   }
+
+  // A chef is unavailable for the day when recovering from an event. Starter
+  // chefs never pick up this flag (see sim.resolveEvent).
+  isAvailable() { return !this.status || this.status.kind !== 'busy'; }
 
   // Returns the stat scaled by the tired multiplier. STR is the one stat that
   // doesn't degrade when tired — it's the meta-stat that defines the tank.
   effStat(name) {
-    const nominal = this[name];
+    let nominal = this[name];
+    if (this.status && this.status.kind === 'stressed' && name === 'int') nominal = Math.max(1, nominal - 2);
     if (name === 'str' || !this.tired) return nominal;
     return nominal * CONFIG.tiredMult;
   }
@@ -604,8 +1062,12 @@ class Employee extends Entity {
     } else {
       this.stamina = Math.min(this.staminaMax, this.stamina + dt);
     }
-    if (!this.tired && this.stamina <= 0) this.tired = true;
-    else if (this.tired && this.stamina >= this.staminaMax * 0.25) this.tired = false;
+    if (!this.tired && this.stamina <= 0) {
+      this.tired = true;
+      this.dayStats.timesTired++; this.career.timesTired++;
+    } else if (this.tired && this.stamina >= this.staminaMax * 0.25) {
+      this.tired = false;
+    }
 
     const arrived = this.stepMovement(dt);
     if (this.state === ES.IDLE) { this.findTask(sim); return; }
@@ -619,6 +1081,8 @@ class Employee extends Entity {
   }
 
   findTask(sim) {
+    // An event-recovering chef drops every task (regen stamina only).
+    if (!this.isAvailable()) return;
     // Priority 1: pick up ready food.
     for (const o of sim.orders) {
       if (o.status !== 'ready' || o.deliveryEmployee) continue;
@@ -666,7 +1130,8 @@ class Employee extends Entity {
     switch (this.state) {
       case ES.TO_STOVE_COOK: {
         if (t.stove && t.stove.reservedFor === t.order && !t.stove.isCooking()) {
-          t.stove.startCooking(t.order); t.order.status = 'cooking';
+          t.stove.startCooking(t.order, sim); t.order.status = 'cooking';
+          fireAbilityHook(this, 'onCookStart', { sim, foodKey: t.order.foodType });
         } else {
           t.order.status = 'pending'; t.order.assignedStove = null;
           if (t.stove) t.stove.reservedFor = null;
@@ -768,6 +1233,27 @@ class Simulation {
     this.trafficMultiplier = 1;
     this.money = CONFIG.startingMoney;
     this.stats = { served: 0, angry: 0, plates: 0, tipsTotal: 0 };
+    this.day           = 1;
+    this.daySpawned    = 0;
+    this.dayStartMoney = CONFIG.startingMoney;
+    this.todayProfile  = {};            // applied on day start: foodBias, quotaMult, tipMult, cookTimeMult
+    this.dayQuota      = this._computeDayQuota(1);
+    this.dayState      = 'spawning';    // 'spawning' | 'draining' | 'dayEnd'
+
+    // Between-day pause state. currentEvent and nextForecast are rolled on
+    // entry to 'dayEnd'; eventOutcome is filled when the player assigns a
+    // chef. startNextDay() consumes them to shape the following day.
+    this.currentEvent     = null;
+    this.eventAssignedChef = null;
+    this.eventOutcome     = null;        // {passed, roll, chef, result}
+    this.nextForecast     = null;        // {label, profile}
+
+    // Popup queue for real-time ability floaters. Each entry is aged in
+    // update() and rendered by Sprites.popups. Unique ids prevent text-pool
+    // key collisions when the same entity fires multiple popups.
+    this.popups     = [];
+    this._popupSeq  = 0;
+
     this.spawnTile = { x: 0, y: 4 };
     this.exitTile  = { x: 0, y: 4 };
     this.grid.setType(this.spawnTile.x, this.spawnTile.y, 'spawn');
@@ -798,7 +1284,7 @@ class Simulation {
     this.placeBuilding('table',  3, 5, true);  this.placeBuilding('chair',  3, 6, true);
     this.placeBuilding('table',  6, 5, true);  this.placeBuilding('chair',  6, 6, true);
 
-    this.hireEmployee(true); this.hireEmployee(true);
+    this.hireEmployee(true);
   }
 
   placeBuilding(type, x, y, free = false) {
@@ -852,9 +1338,115 @@ class Simulation {
     return { ok: true };
   }
 
+  _computeDayQuota(day) {
+    const base = CONFIG.dayBaseQuota * Math.pow(CONFIG.dayGrowthFactor, day - 1);
+    const mult = (this.todayProfile && this.todayProfile.quotaMult) || 1;
+    return Math.max(1, Math.ceil(base * mult));
+  }
+
+  // List of chefs the player can assign to today's event. Starter chefs are
+  // always shown; others must be currently available (not recovering).
+  eligibleChefsForEvent() {
+    return this.employees.filter(e => e.isStarter || e.isAvailable());
+  }
+
+  // Roll the event for an assigned chef and apply its immediate effects
+  // (money delta, status). Forecast profile is stashed and applied at
+  // startNextDay(). Safe to call only while in 'dayEnd'. Returns outcome
+  // summary for the UI.
+  resolveEvent(chefId) {
+    if (this.dayState !== 'dayEnd' || !this.currentEvent || this.eventOutcome) return null;
+    const chef = this.employees.find(e => e.id === chefId);
+    if (!chef) return null;
+    const ev    = this.currentEvent;
+    const dc    = typeof ev.dc === 'function' ? ev.dc(this.day) : (ev.dc || 10);
+    const roll  = Math.floor(Math.random() * 10) + 1;     // 1..10
+    const total = roll + chef.effStat(ev.stat);
+    const passed = total >= dc;
+    const result = passed ? ev.onPass(this, chef) : ev.onFail(this, chef);
+
+    // Default chef status: busy for 1 day (skip tomorrow). Events can override
+    // via statusOverride (e.g. 'starstruck'). Starter chefs shrug off any
+    // disabling status but still accept positive ones.
+    let nextStatus = result.statusOverride || { kind: 'busy', daysLeft: 1 };
+    if (chef.isStarter && nextStatus.kind !== 'starstruck') nextStatus = null;
+    chef.status = nextStatus;
+
+    this.eventAssignedChef = chef;
+    this.eventOutcome = {
+      passed, roll, total, dc,
+      chef, result,
+      msg: result.msg || (passed ? 'Success.' : 'Failed.'),
+    };
+    return this.eventOutcome;
+  }
+
+  // Player clicks "Start Day" in the modal. Advances day counter, resets
+  // per-day stats, ticks chef statuses, and merges the rolled forecast +
+  // event profile into todayProfile.
+  startNextDay() {
+    if (this.dayState !== 'dayEnd') return;
+    if (!this.eventOutcome) return;      // must resolve event first
+
+    // Assemble next day's profile: base forecast + any event profile.
+    const profile = { ...(this.nextForecast && this.nextForecast.profile || {}) };
+    const evProf = this.eventOutcome.result && this.eventOutcome.result.profile;
+    if (evProf) {
+      for (const k of Object.keys(evProf)) {
+        if (k === 'label') continue;
+        if (k === 'tipMult' || k === 'quotaMult' || k === 'cookTimeMult') {
+          profile[k] = (profile[k] || 1) * evProf[k];
+        } else {
+          profile[k] = evProf[k];
+        }
+      }
+    }
+    this.todayProfile = profile;
+
+    this.day++;
+    this.dayQuota      = this._computeDayQuota(this.day);
+    this.daySpawned    = 0;
+    this.spawnTimer    = 0.5;
+    this.dayState      = 'spawning';
+    this.dayStartMoney = this.money;
+    this.stats         = { served: 0, angry: 0, plates: 0, tipsTotal: 0 };
+
+    for (const e of this.employees) {
+      e.dayStats = { dishes: 0, tipsEarned: 0, timesTired: 0, procs: 0 };
+      e.career.daysWorked++;
+    }
+
+    this.currentEvent      = null;
+    this.eventAssignedChef = null;
+    this.eventOutcome      = null;
+    this.nextForecast      = null;
+  }
+
+  // Floater above `entity`. Rendered by Sprites.popups via the pooled text
+  // system; lifetimes tick in update() and expired entries are dropped.
+  emitPopup(entity, icon, label, duration = 1.6) {
+    if (!entity) return;
+    if (entity instanceof Employee) {
+      entity.dayStats.procs++;
+      entity.career.procs++;
+    }
+    this.popups.push({
+      id: ++this._popupSeq,
+      entity, icon: icon || '', label: label || '',
+      age: 0, duration,
+    });
+  }
+
   spawnCustomer() {
-    if (this.customers.filter(c => c.alive).length >= CONFIG.customerMaxConcurrent) return;
-    this.customers.push(new Customer(this.spawnTile.x, this.spawnTile.y, this.time));
+    if (this.customers.filter(c => c.alive).length >= CONFIG.customerMaxConcurrent) return false;
+    const c = new Customer(this.spawnTile.x, this.spawnTile.y, this.time);
+    // Food bias from today's forecast: 70% of customers chase the hot menu.
+    const bias = this.todayProfile && this.todayProfile.foodBias;
+    if (bias && FOODS[bias] && Math.random() < 0.7) c.foodPref = bias;
+    c.abilities = rollCustomerAbilities();
+    c.ordersRemaining = 1 + abilitySum(c, 'extraOrders');
+    this.customers.push(c);
+    return true;
   }
 
   submitOrder(o) { this.orders.push(o); }
@@ -886,11 +1478,37 @@ class Simulation {
   update(dt) {
     this.time += dt;
     if (this.spawnEnabled) {
-      this.spawnTimer -= dt;
-      if (this.spawnTimer <= 0) {
-        this.spawnTimer = CONFIG.customerSpawnInterval / this.trafficMultiplier;
-        this.spawnCustomer();
+      if (this.dayState === 'spawning') {
+        this.spawnTimer -= dt;
+        if (this.spawnTimer <= 0) {
+          this.spawnTimer = CONFIG.customerSpawnInterval / this.trafficMultiplier;
+          if (this.daySpawned < this.dayQuota && this.spawnCustomer()) {
+            this.daySpawned++;
+            if (this.daySpawned >= this.dayQuota) this.dayState = 'draining';
+          }
+        }
+      } else if (this.dayState === 'draining') {
+        if (!this.customers.some(c => c.alive)) {
+          // Status is tick-decremented at end of day so "daysLeft:1" applied
+          // during yesterday's dayEnd naturally clears after one full day.
+          for (const e of this.employees) {
+            if (e.status) {
+              e.status.daysLeft--;
+              if (e.status.daysLeft <= 0) e.status = null;
+            }
+          }
+          this.dayState = 'dayEnd';
+          // Roll today's event + tomorrow's baseline forecast. The modal
+          // reads these; resolveEvent + startNextDay consume them.
+          this.currentEvent  = rollDailyEvent(this.day);
+          this.nextForecast  = rollBaseForecast();
+          this.eventAssignedChef = null;
+          this.eventOutcome  = null;
+        }
       }
+      // 'dayEnd' is a pure pause — the sim keeps ticking (chefs regen
+      // stamina, popups fade), but day progression waits on the player's
+      // Start Day click, which calls startNextDay().
     }
     for (const b of this.buildings) b.update(dt, this);
     for (const e of this.employees) e.update(dt, this);
@@ -898,6 +1516,12 @@ class Simulation {
     this.customers = this.customers.filter(c => c.alive);
     this.orders = this.orders.filter(o =>
       o.status !== 'delivered' && o.status !== 'abandoned' && o.status !== 'lost' && o.customer.alive);
+
+    // Age popup floaters; drop expired entries.
+    if (this.popups.length) {
+      for (const p of this.popups) p.age += dt;
+      this.popups = this.popups.filter(p => p.age < p.duration && p.entity && p.entity.alive !== false);
+    }
   }
 
   orderCountsByStatus() {

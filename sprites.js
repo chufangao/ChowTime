@@ -788,18 +788,18 @@ const Sprites = {
     // Tired: sweat drops drifting up, telegraphs fatigue from a distance.
     if (e.tired) Sprites._tiredSweat(view, e, sx, headY);
 
+    // Name tag is always visible (stacked above the action label).
+    if (e.name) {
+      getText('ename_' + e.id, e.name, sx, headY - 52, {
+        fontFamily: 'system-ui', fontSize: '9px',
+        color: '#ffffff', stroke: '#000000', strokeThickness: 2,
+      });
+    }
     const label = Sprites._employeeLabel(e);
     if (label) {
       getText('elabel_' + e.id, label, sx, headY - 40, {
         fontFamily: 'system-ui', fontSize: '10px', fontStyle: 'bold',
         color: '#ffd84d', stroke: '#000000', strokeThickness: 3,
-      });
-    }
-    // Name tag while idle — makes it easy to pick a chef out of a crowd.
-    if (e.state === ES.IDLE && e.name) {
-      getText('ename_' + e.id, e.name, sx, headY - 52, {
-        fontFamily: 'system-ui', fontSize: '9px',
-        color: '#ffffff', stroke: '#000000', strokeThickness: 2,
       });
     }
   },
@@ -838,6 +838,27 @@ const Sprites = {
       fontFamily: 'system-ui', fontSize: '13px', fontStyle: 'bold',
       color: '#4ade80', stroke: '#000000', strokeThickness: 3,
     });
+  },
+
+  /* ---- Ability popups (real-time floaters above chefs & customers) ----
+   * Iterates sim.popups and renders each as a rising, fading text object. The
+   * pooled-text system keys by popup id, so each popup animates independently
+   * and is culled once its lifetime elapses. */
+  popups(view, sim) {
+    if (!sim.popups || !sim.popups.length) return;
+    for (const p of sim.popups) {
+      const ent = p.entity; if (!ent) continue;
+      const { sx, sy } = gridToScreen(ent.x, ent.y);
+      const t = p.age / p.duration;       // 0 → 1
+      const rise = 6 + t * 34;             // pixels upward over lifetime
+      const fade = t < 0.7 ? 1 : 1 - (t - 0.7) / 0.3;  // flat then fade
+      const txt = p.icon ? `${p.icon} ${p.label}` : p.label;
+      const node = view.getText('pop_' + p.id, txt, sx, sy - 62 - rise, {
+        fontFamily: 'system-ui', fontSize: '12px', fontStyle: 'bold',
+        color: '#ffe680', stroke: '#000000', strokeThickness: 3,
+      });
+      if (node && node.setAlpha) node.setAlpha(Math.max(0, fade));
+    }
   },
 
   /* ---- Chef portrait (head + hair + hat), used in the recruit modal ---- */
