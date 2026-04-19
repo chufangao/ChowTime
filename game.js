@@ -43,7 +43,102 @@ const CONFIG = {
   refundRatio: 0.5,
   trafficLevels: [1, 2, 3, 5],
   speedLevels:   [1, 2, 4],
+  tiredMult:     0.75,   // scales all stats (except STR) while a chef is tired
+  tipRateBase:   0.15,   // baseline tip fraction of meal price at quality×cha = 1
 };
+
+function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+/* ---- Stat-driven helpers (pure) ------------------------------------------- */
+function computeQuality(intStat) {
+  // INT 1..10 → raw [0.2, 2.0] with a touch of jitter. Clamped to [0, 2].
+  const jitter = (Math.random() - 0.5) * 0.2;
+  return clamp(intStat / 5 + jitter, 0, 2);
+}
+
+function computeTip(customer) {
+  // Needs: customer.seatedAt, deliveredAt, table.plate.quality, and the
+  // delivering chef's CHA. The chef ref is stashed on the customer at delivery
+  // (order.deliveryEmployee is cleared right after, so reading it here would
+  // be null).
+  const price = FOODS[customer.foodPref].price;
+  const plate = customer.table && customer.table.plate;
+  const quality = plate && plate.quality != null ? plate.quality : 1.0;
+  const cook    = customer.deliveredBy;
+  const cha     = cook ? cook.effStat('cha') : 5;
+
+  const waitSec = (customer.deliveredAt != null && customer.seatedAt != null)
+                  ? customer.deliveredAt - customer.seatedAt : 10;
+  const waitFac = clamp(1 - (waitSec - 4) / 20, 0, 1);
+  const effQual = quality * waitFac;                  // 0 .. 2
+  const tipMult = 0.5 + (cha - 1) / 9;                // 0.5 .. 1.5
+  const noise   = 1 + (Math.random() - 0.5) * 0.2;    // 0.9 .. 1.1
+  const frac    = effQual * tipMult * CONFIG.tipRateBase;
+  return Math.max(0, Math.round(price * frac * noise));
+}
+
+/* ---- Chef presets ---------------------------------------------------------- */
+// Starter chefs seeded at game start. Skin tone is randomized from SKIN_TONES
+// (defined in sprites.js) per instance so the two starters don't look identical.
+const STARTER_CHEF = {
+  name: 'Line Cook',
+  bio:  'does the job. no questions asked.',
+  dex: 5, spd: 5, str: 5, int: 5, cha: 5,
+  visual: { hat: 0, hasHair: false },   // skinColor filled in at construction
+  cost: 0,
+};
+
+// Fixed roster of 10 hireable chefs. Each can only be hired once; the pool
+// shrinks as the player recruits. All colors are raw hex so this stays
+// Phaser-free / sprites-free.
+const CHEF_ROSTER = [
+  { name: 'Marco "The Knife" Ferraro',
+    bio:  'twenty years in a Naples kitchen. does not smile.',
+    dex: 9, spd: 5, str: 4, int: 7, cha: 2,
+    visual: { skinColor: 0xe8a777, hairColor: 0x3a2a1a, hasHair: true,  hat: 0 } },
+  { name: 'Sunny Oduya',
+    bio:  'brightest personality. burns the soup sometimes.',
+    dex: 4, spd: 7, str: 6, int: 3, cha: 10,
+    visual: { skinColor: 0x8b5a3a, hairColor: 0x1a1a1a, hasHair: false, hat: 3 } },
+  { name: 'Nana Beatrice',
+    bio:  'retired. unretired. cooks like she raised you.',
+    dex: 6, spd: 2, str: 8, int: 9, cha: 8,
+    visual: { skinColor: 0xfde5c8, hairColor: 0xe0d0b0, hasHair: true,  hat: 0 } },
+  { name: 'Yuki Tanaka',
+    bio:  'silent, surgical. the plates come out clean.',
+    dex: 10, spd: 6, str: 3, int: 8, cha: 3,
+    visual: { skinColor: 0xfec9a7, hairColor: 0x1a1a1a, hasHair: true,  hat: 1 } },
+  { name: 'Big Tommy',
+    bio:  'can flip burgers with one hand. will.',
+    dex: 4, spd: 3, str: 10, int: 4, cha: 6,
+    visual: { skinColor: 0xc68a5a, hairColor: 0x8a6a3a, hasHair: true,  hat: 3 } },
+  { name: 'Priya Raval',
+    bio:  'trained in three Michelin kitchens. networks constantly.',
+    dex: 7, spd: 6, str: 5, int: 8, cha: 9,
+    visual: { skinColor: 0xc68a5a, hairColor: 0x1a1a1a, hasHair: true,  hat: 0 } },
+  { name: 'Colt "Speed" Jensen',
+    bio:  'used to race. cooks like it too.',
+    dex: 5, spd: 10, str: 4, int: 3, cha: 7,
+    visual: { skinColor: 0xfec9a7, hairColor: 0xbd9a5a, hasHair: true,  hat: 4 } },
+  { name: 'Wanda Kowalski',
+    bio:  'balanced. reliable. brought her own knives.',
+    dex: 6, spd: 6, str: 6, int: 6, cha: 6,
+    visual: { skinColor: 0xe8a777, hairColor: 0xc94a2a, hasHair: true,  hat: 0 } },
+  { name: 'Gus the Intern',
+    bio:  'he is trying his best. please be kind.',
+    dex: 3, spd: 4, str: 3, int: 3, cha: 8,
+    visual: { skinColor: 0xfde5c8, hairColor: 0x3a2a1a, hasHair: true,  hat: 0 } },
+  { name: 'Chef Blaise',
+    bio:  'the old master. slow moving, genius on the stove.',
+    dex: 8, spd: 2, str: 6, int: 10, cha: 7,
+    visual: { skinColor: 0xe8a777, hairColor: 0xe0d0b0, hasHair: true,  hat: 2 } },
+];
+// Derive each chef's cost from total stats: baseline 5×5 = 25 → $150,
+// maxed 10×5 = 50 → $500. Mutate here so designers only tune stats.
+for (const c of CHEF_ROSTER) {
+  const total = c.dex + c.spd + c.str + c.int + c.cha;
+  c.cost = Math.round(80 + (total - 20) * 14);
+}
 
 
 /* ---- Grid + pathfinding ---------------------------------------------------- */
@@ -141,14 +236,24 @@ class Stove extends Building {
   isAvailable()  { return !this.cooking && !this.reservedFor; }
   startCooking(order) {
     const food = FOODS[order.foodType];
-    this.cooking = { order, timeLeft: food.cookTime, total: food.cookTime };
+    // Cook stats (via effStat so tiredness folds in automatically):
+    //   DEX scales cookTime down, INT drives food quality at cook time.
+    const cook = order.cookingEmployee;
+    const dex  = cook ? cook.effStat('dex') : 5;
+    const mult = clamp(1.3 - 0.06 * dex, 0.5, 1.3);
+    const cookTime = food.cookTime * mult;
+    const quality  = cook ? computeQuality(cook.effStat('int')) : 1.0;
+    this.cooking = { order, timeLeft: cookTime, total: cookTime, quality };
     this.reservedFor = null;
   }
   update(dt) {
     if (!this.cooking) return;
     this.cooking.timeLeft -= dt;
     if (this.cooking.timeLeft <= 0) {
-      const o = this.cooking.order; o.status = 'ready'; o.readyStove = this;
+      const o = this.cooking.order;
+      o.status = 'ready';
+      o.readyStove = this;
+      o.quality = this.cooking.quality;   // carry quality forward to delivery
       this.cooking = null;
     }
   }
@@ -271,6 +376,14 @@ class Customer extends Entity {
     this.eatTimer = 0; this.retrySeatTimer = 0;
     this.leftReason = null;
 
+    // Tip bookkeeping: seatedAt set when entering WAITING, deliveredAt when
+    // a plate lands, tipAwarded written at 'happy' leave so the floater sprite
+    // can render it above the exiting customer.
+    this.seatedAt    = null;
+    this.deliveredAt = null;
+    this.deliveredBy = null;
+    this.tipAwarded  = 0;
+
     // Visual randomization — palettes live in sprites.js. Read by SPRITES,
     // never mutated during play.
     const pick = (a) => a[(Math.random() * a.length) | 0];
@@ -328,6 +441,7 @@ class Customer extends Entity {
       case CS.WALKING:
         if (arrived) {
           this.state = CS.WAITING;
+          this.seatedAt = sim.time;
           this.order = new Order(this, this.foodPref);
           sim.submitOrder(this.order);
         }
@@ -391,8 +505,16 @@ class Customer extends Entity {
       if (o.readyStove) o.readyStove = null;
     }
 
-    if (reason === 'happy') { sim.stats.served++; sim.money += FOODS[this.foodPref].price; }
-    else sim.stats.angry++;
+    if (reason === 'happy') {
+      sim.stats.served++;
+      const price = FOODS[this.foodPref].price;
+      const tip   = computeTip(this);
+      this.tipAwarded = tip;
+      sim.money += price + tip;
+      sim.stats.tipsTotal += tip;
+    } else {
+      sim.stats.angry++;
+    }
 
     // Queue-giver-upper: off-grid, just storm west.
     if (this.x < 0) { this.setPath([{ x: -5, y: this.y }]); return; }
@@ -416,15 +538,52 @@ const ES = {
 };
 
 class Employee extends Entity {
-  constructor(x, y) {
+  constructor(x, y, preset = STARTER_CHEF) {
     super(x, y);
-    this.speed = CONFIG.employeeSpeed;
     this.state = ES.IDLE;
     this.task = null;
     this.carrying = null;
     this.carryingDirty = false;
-    // SKIN_TONES lives in sprites.js.
-    this.skinColor = SKIN_TONES[(Math.random() * SKIN_TONES.length) | 0];
+
+    // Identity + stats from the roster preset (pure data, no Phaser).
+    this.name = preset.name;
+    this.bio  = preset.bio;
+    this.dex  = preset.dex;
+    this.spd  = preset.spd;
+    this.str  = preset.str;
+    this.int  = preset.int;
+    this.cha  = preset.cha;
+
+    // Visuals: prefer preset values; fall back to random SKIN_TONES pick so
+    // two starter chefs don't look identical.
+    const v = preset.visual || {};
+    this.visual = {
+      skinColor: v.skinColor != null ? v.skinColor
+                 : SKIN_TONES[(Math.random() * SKIN_TONES.length) | 0],
+      hairColor: v.hairColor != null ? v.hairColor : 0x3a2a1a,
+      hasHair:   v.hasHair === true,
+      hat:       v.hat != null ? v.hat : 0,
+    };
+    // Legacy alias used by parts of Sprites.employee that read e.skinColor.
+    this.skinColor = this.visual.skinColor;
+
+    // Stamina / tired: STR drives tank size. Starts full; ticks down while
+    // working, regenerates while IDLE. Tired is a flag (hysteresis set in
+    // update), not a state — the chef keeps working at 75%.
+    this.staminaMax = 30 + 6 * this.str;
+    this.stamina    = this.staminaMax;
+    this.tired      = false;
+
+    // Speed is recomputed per-frame in update() so tiredness is responsive.
+    this.speed = CONFIG.employeeSpeed * (0.7 + 0.06 * this.spd);
+  }
+
+  // Returns the stat scaled by the tired multiplier. STR is the one stat that
+  // doesn't degrade when tired — it's the meta-stat that defines the tank.
+  effStat(name) {
+    const nominal = this[name];
+    if (name === 'str' || !this.tired) return nominal;
+    return nominal * CONFIG.tiredMult;
   }
 
   pathToAdjacent(sim, tx, ty) {
@@ -435,6 +594,19 @@ class Employee extends Entity {
   }
 
   update(dt, sim) {
+    // Per-frame speed recompute so tiredness kicks in immediately.
+    this.speed = CONFIG.employeeSpeed * (0.7 + 0.06 * this.effStat('spd'));
+
+    // Stamina: decay while working, regenerate while idle. Tired flips with
+    // hysteresis so the chef doesn't flicker on/off at the threshold.
+    if (this.state !== ES.IDLE) {
+      this.stamina -= dt;
+    } else {
+      this.stamina = Math.min(this.staminaMax, this.stamina + dt);
+    }
+    if (!this.tired && this.stamina <= 0) this.tired = true;
+    else if (this.tired && this.stamina >= this.staminaMax * 0.25) this.tired = false;
+
     const arrived = this.stepMovement(dt);
     if (this.state === ES.IDLE) { this.findTask(sim); return; }
     // customer.alive stays true through LEAVING, so check state explicitly
@@ -514,7 +686,13 @@ class Employee extends Entity {
         const c = t.order.customer;
         const table = c.table;
         if (table && c.alive && c.state === CS.WAITING) {
-          table.plate = { foodType: t.order.foodType, dirty: false };
+          table.plate = {
+            foodType: t.order.foodType,
+            dirty: false,
+            quality: t.order.quality != null ? t.order.quality : 1.0,
+          };
+          c.deliveredAt = sim.time;
+          c.deliveredBy = this;          // stash before order clears the ref
           t.order.status = 'delivered';
         } else {
           t.order.status = 'abandoned';
@@ -553,10 +731,23 @@ class Employee extends Entity {
     if (t) {
       if (t.order) {
         const o = t.order;
+        // Note whether this was a live cook BEFORE we clear refs. A chef
+        // aborting mid-cook should re-pend the order so another cook can
+        // pick it up — but only if the customer hasn't already walked
+        // (Customer.leave stamps status 'abandoned' first; respect that).
+        const wasCooking = t.stove && t.stove.cooking && t.stove.cooking.order === o;
         o.cookingEmployee = null; o.deliveryEmployee = null;
         if (t.stove && t.stove.reservedFor === o) t.stove.reservedFor = null;
-        if (t.stove && t.stove.cooking && t.stove.cooking.order === o) t.stove.cooking = null;
-        if (o.status !== 'delivered') o.status = 'abandoned';
+        if (wasCooking) t.stove.cooking = null;
+        if (o.status !== 'delivered' && o.status !== 'abandoned') {
+          if (wasCooking) {
+            o.status = 'pending';
+            o.assignedStove = null;
+            o.readyStove = null;
+          } else {
+            o.status = 'abandoned';
+          }
+        }
       }
       if (t.table) t.table.cleaningAssigned = false;
       if (t.sink)  t.sink.reservedFor = null;
@@ -576,10 +767,17 @@ class Simulation {
     this.time = 0; this.spawnTimer = 1; this.spawnEnabled = true;
     this.trafficMultiplier = 1;
     this.money = CONFIG.startingMoney;
-    this.stats = { served: 0, angry: 0, plates: 0 };
+    this.stats = { served: 0, angry: 0, plates: 0, tipsTotal: 0 };
     this.spawnTile = { x: 0, y: 4 };
     this.exitTile  = { x: 0, y: 4 };
     this.grid.setType(this.spawnTile.x, this.spawnTile.y, 'spawn');
+
+    // Live recruit pool. Each entry carries an `id` (stable across the run)
+    // used by the UI to identify the chef clicked. Shuffle so the player sees
+    // a different order every session; removed on hire so every chef is unique.
+    this.recruitPool = CHEF_ROSTER
+      .map((e, i) => ({ ...e, id: i }))
+      .sort(() => Math.random() - 0.5);
   }
 
   seedDemo() {
@@ -631,11 +829,27 @@ class Simulation {
     return true;
   }
 
+  // Seeds the demo with two starter chefs. The roster-based path is
+  // hireFromRoster — this legacy method is only used by seedDemo.
   hireEmployee(free = false) {
     if (!free && this.money < CONFIG.costs.employee) return false;
     if (!free) this.money -= CONFIG.costs.employee;
-    this.employees.push(new Employee(this.spawnTile.x, this.spawnTile.y));
+    this.employees.push(new Employee(this.spawnTile.x, this.spawnTile.y, STARTER_CHEF));
     return true;
+  }
+
+  // Recruit from the modal. entryId matches the `id` field on a recruitPool
+  // entry; we look it up instead of indexing so clicks remain valid if other
+  // hires mutated the array underfoot. Returns {ok, reason} for the UI.
+  hireFromRoster(entryId) {
+    const idx = this.recruitPool.findIndex(e => e.id === entryId);
+    if (idx < 0) return { ok: false, reason: 'gone' };
+    const entry = this.recruitPool[idx];
+    if (this.money < entry.cost) return { ok: false, reason: 'no-money' };
+    this.money -= entry.cost;
+    this.recruitPool.splice(idx, 1);
+    this.employees.push(new Employee(this.spawnTile.x, this.spawnTile.y, entry));
+    return { ok: true };
   }
 
   spawnCustomer() {

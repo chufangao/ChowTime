@@ -147,8 +147,12 @@ class Sidebar {
       .setOrigin(0, 0)
       .setInteractive({ useHandCursor: true });
     hit.on('pointerdown', () => {
-      if (def.id === 'hire') this.sim.hireEmployee();
-      else this.tool = (this.tool === def.id) ? null : def.id;
+      if (def.id === 'hire') {
+        // Route through the recruit modal; the scene wires it at create time.
+        if (this.scene.recruitModal) this.scene.recruitModal.open();
+      } else {
+        this.tool = (this.tool === def.id) ? null : def.id;
+      }
     });
     return { def, rect, label, cost, hit };
   }
@@ -241,6 +245,7 @@ class Sidebar {
     this.moneyText.setText(`$${sim.money}`);
     this.statsText.setText(
       `😊 ${sim.stats.served}  😡 ${sim.stats.angry}  🍽 ${sim.stats.plates}  ·  ` +
+      `💰 tips $${sim.stats.tipsTotal}  ·  ` +
       `waiting ${live}  cooks ${sim.employees.length}  ${Math.floor(sim.time)}s  ·  ` +
       `🌊 ${sim.trafficMultiplier}×`
     );
@@ -252,6 +257,305 @@ class Sidebar {
       ? `🔨 Tool: ${this.tool} — click a tile. Right-click removes.`
       : `Click a tool on the right. Right-click any tile to remove.`;
     this.tipText.setText(tip);
+  }
+}
+
+
+/* ============================================================================
+ * RecruitModal — the "Hire Cook" panel
+ * ============================================================================
+ * Shown on top of the play area when the sidebar's Hire button is clicked.
+ * Lays out sim.recruitPool as a 5×2 grid of cards. Each card is a Phaser Zone
+ * stacked with Text + Graphics for the portrait, stat bars, and cost footer.
+ * Re-rendered every frame while open — the cost coloring and affordability X
+ * flip live with sim.money, matching the sidebar's existing pattern.
+ */
+class RecruitModal {
+  constructor(scene, sim) {
+    this.scene = scene;
+    this.sim   = sim;
+    this.isOpen = false;
+    this._noMoneyFlashUntil = 0;    // monotonic sim.time; card cost flashes red
+    this._noMoneyFlashId    = -1;   // which card flashes
+
+    // Dynamic Graphics layer (backdrop, panel, stat bars, portraits).
+    this._g = scene.add.graphics();
+    this._g.setDepth(1000);
+    this._g.setVisible(false);
+
+    // Backdrop zone absorbs outside clicks → close.
+    this._backdrop = scene.add.zone(0, 0, GAME_W, GAME_H)
+      .setOrigin(0, 0)
+      .setInteractive()
+      .setDepth(999);
+    this._backdrop.on('pointerdown', (p) => {
+      if (!this.isOpen) return;
+      // Only close if the click was on the dark area, not inside the panel
+      // (the card zones are at depth 1001 and will consume those clicks first).
+      if (!this._pointInPanel(p.x, p.y)) this.close();
+    });
+    this._backdrop.setVisible(false);
+
+    // Titles + static labels (created once, positions frozen; hidden when closed).
+    this._texts = [];
+    this._title = this._addLabel(this._panelX() + 20, this._panelY() + 14, 'Recruit a Cook', {
+      font: 'bold 20px system-ui', color: '#ffffff', stroke: '#000', strokeThickness: 3,
+    });
+    this._sub = this._addLabel(this._panelX() + 20, this._panelY() + 38, 'Click a chef to hire them.', {
+      font: 'italic 11px system-ui', color: '#c0b0e0',
+    });
+    this._cashLabel = this._addLabel(this._panelX() + this._panelW() - 20, this._panelY() + 20, '',
+      { font: 'bold 14px system-ui', color: '#ffd84d', stroke: '#000', strokeThickness: 2 },
+      1, 0);
+    this._emptyLabel = this._addLabel(this._panelX() + this._panelW() / 2, this._panelY() + this._panelH() / 2,
+      'No more chefs seeking work.',
+      { font: 'bold 14px system-ui', color: '#c0b0e0', stroke: '#000', strokeThickness: 2 },
+      0.5, 0.5);
+
+    // Close "×" button (top-right of panel).
+    const closeRect = { x: this._panelX() + this._panelW() - 36, y: this._panelY() + 36, w: 24, h: 24 };
+    this._closeBg   = this._g;  // drawn in render()
+    this._closeRect = closeRect;
+    this._closeLabel = this._addLabel(closeRect.x + closeRect.w / 2, closeRect.y + closeRect.h / 2, '×',
+      { font: 'bold 20px system-ui', color: '#ffffff' }, 0.5, 0.5);
+    this._closeHit = scene.add.zone(closeRect.x, closeRect.y, closeRect.w, closeRect.h)
+      .setOrigin(0, 0)
+      .setInteractive({ useHandCursor: true })
+      .setDepth(1002);
+    this._closeHit.on('pointerdown', () => this.close());
+    this._closeHit.setVisible(false);
+
+    // Card pool: ten zones + ten text groups, laid out once. We resize content
+    // every frame during render(); zones never move, only their visibility and
+    // contents change. 5 cols × 2 rows.
+    this._cards = [];
+    const grid = this._cardGrid();
+    for (let i = 0; i < 10; i++) {
+      const { x, y, w, h } = grid[i];
+      const hit = scene.add.zone(x, y, w, h)
+        .setOrigin(0, 0)
+        .setInteractive({ useHandCursor: true })
+        .setDepth(1001);
+      hit.on('pointerdown', () => this._onCardClick(i));
+
+      const name = this._addLabel(x + 8, y + 82, '', {
+        font: 'bold 11px system-ui', color: '#ffffff', stroke: '#000', strokeThickness: 2,
+      });
+      const bio = this._addLabel(x + 8, y + 98, '', {
+        font: 'italic 9px system-ui', color: '#c0b0e0',
+      });
+      const costLabel = this._addLabel(x + w / 2, y + h - 14, '', {
+        font: 'bold 12px system-ui', color: '#ffd84d', stroke: '#000', strokeThickness: 2,
+      }, 0.5, 0.5);
+      // Five stat labels — "DEX 7" style — rendered alongside the tiny bars.
+      const statLabels = ['DEX','SPD','STR','INT','CHA'].map((k, si) => {
+        return this._addLabel(x + 8, y + 118 + si * 14, '', {
+          font: 'bold 10px monospace', color: '#ffffff',
+        });
+      });
+      this._cards.push({ hit, name, bio, costLabel, statLabels });
+    }
+
+    this._hideCards();
+    this._setStaticsVisible(false);
+    this._setZonesActive(false);    // input disabled until the modal is open
+
+    // ESC closes the modal if open.
+    scene.input.keyboard.on('keydown-ESC', () => { if (this.isOpen) this.close(); });
+  }
+
+  // Phaser keeps Zones receiving input even while invisible; toggle it
+  // explicitly so the backdrop doesn't swallow sidebar / grid clicks while
+  // the modal is closed.
+  _setZonesActive(active) {
+    const toggle = (z) => active ? z.setInteractive() : z.disableInteractive();
+    toggle(this._backdrop);
+    toggle(this._closeHit);
+    for (const c of this._cards) toggle(c.hit);
+  }
+
+  /* ---- Geometry helpers ---- */
+  _panelW() { return 780; }
+  _panelH() { return 540; }
+  _panelX() { return Math.floor((GAME_W - this._panelW()) / 2); }
+  _panelY() { return Math.floor((GAME_H - this._panelH()) / 2); }
+  _pointInPanel(x, y) {
+    return x >= this._panelX() && x <= this._panelX() + this._panelW()
+        && y >= this._panelY() && y <= this._panelY() + this._panelH();
+  }
+  _cardGrid() {
+    // 5 cols × 2 rows, under the title strip.
+    const cols = 5, rows = 2;
+    const cardW = 140, cardH = 200;
+    const gap = 12;
+    const totalW = cols * cardW + (cols - 1) * gap;
+    const startX = this._panelX() + Math.floor((this._panelW() - totalW) / 2);
+    const startY = this._panelY() + 72;
+    const out = [];
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        out.push({
+          x: startX + c * (cardW + gap),
+          y: startY + r * (cardH + gap),
+          w: cardW, h: cardH,
+        });
+      }
+    }
+    return out;
+  }
+
+  /* ---- Label helpers ---- */
+  _addLabel(x, y, str, style, ox = 0, oy = 0) {
+    const t = this.scene.add.text(x, y, str, style).setOrigin(ox, oy).setDepth(1002);
+    t.setVisible(false);
+    this._texts.push(t);
+    return t;
+  }
+  _setStaticsVisible(v) {
+    this._title.setVisible(v);
+    this._sub.setVisible(v);
+    this._cashLabel.setVisible(v);
+    this._closeLabel.setVisible(v);
+    this._closeHit.setVisible(v);
+  }
+  _hideCards() {
+    for (const c of this._cards) {
+      c.hit.setVisible(false);
+      c.name.setVisible(false);
+      c.bio.setVisible(false);
+      c.costLabel.setVisible(false);
+      for (const sl of c.statLabels) sl.setVisible(false);
+    }
+    this._emptyLabel.setVisible(false);
+  }
+
+  /* ---- Open / close ---- */
+  open() {
+    this.isOpen = true;
+    this._g.setVisible(true);
+    this._backdrop.setVisible(true);
+    this._setStaticsVisible(true);
+    this._setZonesActive(true);
+    // render() handles per-card visibility.
+    this.render();
+  }
+  close() {
+    this.isOpen = false;
+    this._g.setVisible(false);
+    this._g.clear();
+    this._backdrop.setVisible(false);
+    this._setStaticsVisible(false);
+    this._hideCards();
+    this._setZonesActive(false);
+  }
+
+  /* ---- Click handling ---- */
+  _onCardClick(cardIdx) {
+    const entry = this.sim.recruitPool[cardIdx];
+    if (!entry) return;
+    const res = this.sim.hireFromRoster(entry.id);
+    if (res.ok) {
+      this.close();
+    } else if (res.reason === 'no-money') {
+      // Flash this card's cost label red for ~600 ms. We stamp a deadline in
+      // sim.time and render() picks it up.
+      this._noMoneyFlashUntil = this.sim.time + 0.6;
+      this._noMoneyFlashId    = cardIdx;
+    }
+  }
+
+  /* ---- Per-frame draw ---- */
+  render() {
+    if (!this.isOpen) return;
+    const g = this._g; g.clear();
+
+    // Dim backdrop.
+    g.fillStyle(0x000000, 0.55); g.fillRect(0, 0, GAME_W, GAME_H);
+
+    // Panel shell.
+    const px = this._panelX(), py = this._panelY();
+    const pw = this._panelW(), ph = this._panelH();
+    g.fillStyle(COLORS.uiBg, 1);     g.fillRoundedRect(px, py, pw, ph, 10);
+    g.lineStyle(3, 0x6b5ba8, 1);     g.strokeRoundedRect(px, py, pw, ph, 10);
+    g.fillStyle(0x6b5ba8, 1);        g.fillRect(px, py + 58, pw, 2);
+
+    // Close "×" frame.
+    const cr = this._closeRect;
+    g.fillStyle(0x3d2d5c, 1); g.fillRoundedRect(cr.x, cr.y, cr.w, cr.h, 4);
+    g.lineStyle(2, COLORS.outline, 0.8); g.strokeRoundedRect(cr.x, cr.y, cr.w, cr.h, 4);
+
+    // Header cash readout.
+    this._cashLabel.setText(`Cash: $${this.sim.money}`);
+
+    // Empty state.
+    const pool = this.sim.recruitPool;
+    if (pool.length === 0) {
+      this._hideCards();
+      this._emptyLabel.setVisible(true);
+      return;
+    } else {
+      this._emptyLabel.setVisible(false);
+    }
+
+    // Render up to 10 cards from the pool. Any leftover slots hide.
+    for (let i = 0; i < this._cards.length; i++) {
+      const card = this._cards[i];
+      const entry = pool[i];
+      if (!entry) {
+        card.hit.setVisible(false);
+        card.name.setVisible(false);
+        card.bio.setVisible(false);
+        card.costLabel.setVisible(false);
+        for (const sl of card.statLabels) sl.setVisible(false);
+        continue;
+      }
+
+      const rect = card.hit;
+      const x = rect.x, y = rect.y;
+      const w = rect.width, h = rect.height;
+
+      // Card body.
+      g.fillStyle(COLORS.uiPanel, 1);
+      g.fillRoundedRect(x, y, w, h, 8);
+      g.lineStyle(2, COLORS.outline, 0.7);
+      g.strokeRoundedRect(x, y, w, h, 8);
+
+      // Portrait slot at top (framed).
+      g.fillStyle(0x231a30, 1);
+      g.fillRoundedRect(x + 10, y + 8, w - 20, 64, 6);
+      g.lineStyle(1.5, COLORS.outline, 0.5);
+      g.strokeRoundedRect(x + 10, y + 8, w - 20, 64, 6);
+      Sprites.chefPortrait(g, entry, x + w / 2, y + 34);
+
+      // Name + bio (truncate bio to fit).
+      card.name.setText(entry.name);
+      const bio = entry.bio.length > 30 ? entry.bio.slice(0, 28) + '…' : entry.bio;
+      card.bio.setText(bio);
+      card.name.setVisible(true);
+      card.bio.setVisible(true);
+
+      // Five stat rows: label + bar to the right of the label.
+      const keys = ['dex', 'spd', 'str', 'int', 'cha'];
+      const upper = ['DEX', 'SPD', 'STR', 'INT', 'CHA'];
+      for (let si = 0; si < 5; si++) {
+        const v = entry[keys[si]];
+        card.statLabels[si].setText(`${upper[si]} ${v}`);
+        card.statLabels[si].setVisible(true);
+        const barX = x + 50;
+        const barY = y + 120 + si * 14;
+        Sprites.statBar(g, barX, barY, w - 58, 8, v, 10);
+      }
+
+      // Cost footer — gray + ✗ if unaffordable; flashing red if the player
+      // clicked while broke.
+      const affordable = this.sim.money >= entry.cost;
+      const flashing = (this._noMoneyFlashId === i) && (this.sim.time < this._noMoneyFlashUntil);
+      card.costLabel.setText(`$${entry.cost}${affordable ? '' : ' ✗'}`);
+      card.costLabel.setColor(flashing ? '#ff4d4d' : (affordable ? '#ffd84d' : '#8888a0'));
+      card.costLabel.setVisible(true);
+
+      card.hit.setVisible(true);
+    }
   }
 }
 
@@ -285,6 +589,9 @@ class GameScene extends Phaser.Scene {
     // --- Sidebar owns UI state (this.sidebar.tool, this.sidebar.speed) ---
     this.sidebar = new Sidebar(this, this.sim);
 
+    // --- Recruit modal: Sidebar.hire opens it; it draws on top of everything. ---
+    this.recruitModal = new RecruitModal(this, this.sim);
+
     // --- Build the view context passed to every sprite call ---
     this._view = {
       g:       this.gObjects,
@@ -312,17 +619,23 @@ class GameScene extends Phaser.Scene {
 
     this._drawScene();
     this.sidebar.refresh();
+    if (this.recruitModal.isOpen) this.recruitModal.render();
     this._cullTexts();
   }
 
   /* ---- Input ---- */
   _onPointerMove(p) {
+    // Don't track grid hover while the recruit modal is up.
+    if (this.recruitModal && this.recruitModal.isOpen) { this.hover = null; return; }
     if (p.x >= GAME_W - UI_W) { this.hover = null; return; }
     const tile = screenToTile(p.x, p.y);
     if (!tile) { this.hover = null; return; }
     this.hover = { x: tile.x, y: tile.y, valid: this._isToolValidAt(tile.x, tile.y) };
   }
   _onPointerDown(p) {
+    // Recruit modal owns its own Zones, but guard here too so a rogue grid
+    // click behind a transparent patch of backdrop can't place a building.
+    if (this.recruitModal && this.recruitModal.isOpen) return;
     // Sidebar clicks are handled by the interactive Zones inside Sidebar.
     if (p.x >= GAME_W - UI_W) return;
     const tile = screenToTile(p.x, p.y); if (!tile) return;
@@ -379,6 +692,8 @@ class GameScene extends Phaser.Scene {
         else if (b.type === 'sink')  Sprites.sink (view, b, it.sx, sy);
       } else if (it.kind === 'c') {
         Sprites.customer(view, it.ref, it.sx, it.sy);
+        // Piggybacks on the pooled-text system so the +$N fades via cull.
+        Sprites.tipFloater(view, it.ref, it.sx, it.sy);
       } else {
         Sprites.employee(view, it.ref, it.sx, it.sy);
       }

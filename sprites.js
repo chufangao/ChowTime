@@ -650,8 +650,11 @@ const Sprites = {
   employee(view, e, sx, sy) {
     const { g, time, getText } = view;
     const moving = e.hasPath();
-    const stride = moving ? Math.sin(time * 12 + e.id) : 0;
-    const bob    = moving ? Math.abs(Math.sin(time * 12 + e.id)) * 1.5 : 0;
+    // Tired chefs walk noticeably slower (fewer stride cycles per sec) — purely
+    // cosmetic, but a cheap readability win when the labels alone aren't enough.
+    const stridePace = e.tired ? 8.4 : 12;      // 12 * 0.7
+    const stride = moving ? Math.sin(time * stridePace + e.id) : 0;
+    const bob    = moving ? Math.abs(Math.sin(time * stridePace + e.id)) * 1.5 : 0;
 
     // Shadow
     g.fillStyle(0x000000, 0.3); g.fillEllipse(sx, sy + 2, 18, 6);
@@ -706,18 +709,39 @@ const Sprites = {
     g.fillStyle(e.skinColor, 1); g.fillCircle(sx, headY, headR);
     g.lineStyle(2, COLORS.outline, 1); g.strokeCircle(sx, headY, headR);
 
-    // Chef hat (band + three puffs)
-    g.fillStyle(0xf5f5f5, 1);
-    g.fillRoundedRect(sx - 10, headY - 14, 20, 6, 2);
-    g.lineStyle(2, COLORS.outline, 1);
-    g.strokeRoundedRect(sx - 10, headY - 14, 20, 6, 2);
-    g.fillStyle(0xffffff, 1);
-    g.fillCircle(sx - 6, headY - 20, 7.5);
-    g.fillCircle(sx + 6, headY - 21, 7.5);
-    g.fillCircle(sx, headY - 25, 7);
-    g.strokeCircle(sx - 6, headY - 20, 7.5);
-    g.strokeCircle(sx + 6, headY - 21, 7.5);
-    g.strokeCircle(sx, headY - 25, 7);
+    // Hair (if the preset has it and hat won't fully cover). Skip for the
+    // toque and the top hat — they cover the scalp.
+    const hatIdx = (e.visual && e.visual.hat != null) ? e.visual.hat : 0;
+    const hairHidden = (hatIdx === 0 || hatIdx === 2);
+    if (e.visual && e.visual.hasHair && !hairHidden) {
+      g.fillStyle(e.visual.hairColor, 1);
+      g.beginPath(); g.arc(sx, headY - 3, headR - 0.5, Math.PI + 0.25, -0.25, false); g.closePath();
+      g.fillPath();
+      g.lineStyle(1.5, COLORS.outline, 1); g.strokePath();
+    }
+
+    if (hatIdx === 0) {
+      // Classic chef toque (band + three puffs) — the default look.
+      g.fillStyle(0xf5f5f5, 1);
+      g.fillRoundedRect(sx - 10, headY - 14, 20, 6, 2);
+      g.lineStyle(2, COLORS.outline, 1);
+      g.strokeRoundedRect(sx - 10, headY - 14, 20, 6, 2);
+      g.fillStyle(0xffffff, 1);
+      g.fillCircle(sx - 6, headY - 20, 7.5);
+      g.fillCircle(sx + 6, headY - 21, 7.5);
+      g.fillCircle(sx, headY - 25, 7);
+      g.strokeCircle(sx - 6, headY - 20, 7.5);
+      g.strokeCircle(sx + 6, headY - 21, 7.5);
+      g.strokeCircle(sx, headY - 25, 7);
+    } else {
+      // Reuse the customer hat renderer for non-toque styles. _hat reads
+      // `.hat` + `.hatColor` — we feed it a synthetic object so we don't
+      // have to fork the drawing logic.
+      const hatColor = e.visual.hatColor != null
+        ? e.visual.hatColor
+        : (e.visual.hairColor || 0xd64040);
+      Sprites._hat(g, { hat: hatIdx, hatColor }, sx, headY, time);
+    }
 
     // Eyes, cheeks, mustache
     const eyeY = headY + 1;
@@ -761,6 +785,9 @@ const Sprites = {
       g.lineBetween(cxP - 5, cyP + 2, cxP + 5, cyP + 2);
     }
 
+    // Tired: sweat drops drifting up, telegraphs fatigue from a distance.
+    if (e.tired) Sprites._tiredSweat(view, e, sx, headY);
+
     const label = Sprites._employeeLabel(e);
     if (label) {
       getText('elabel_' + e.id, label, sx, headY - 40, {
@@ -768,18 +795,126 @@ const Sprites = {
         color: '#ffd84d', stroke: '#000000', strokeThickness: 3,
       });
     }
+    // Name tag while idle — makes it easy to pick a chef out of a crowd.
+    if (e.state === ES.IDLE && e.name) {
+      getText('ename_' + e.id, e.name, sx, headY - 52, {
+        fontFamily: 'system-ui', fontSize: '9px',
+        color: '#ffffff', stroke: '#000000', strokeThickness: 2,
+      });
+    }
+  },
+
+  _tiredSweat(view, e, sx, headY) {
+    const { overlay, time } = view;
+    for (let i = 0; i < 2; i++) {
+      const off = ((time * 1.2) + i * 0.5) % 1;
+      const px = sx + (i === 0 ? -10 : 10);
+      const py = headY - 8 - off * 10;
+      overlay.fillStyle(0x7fb8d9, 0.75 * (1 - off));
+      overlay.fillCircle(px, py, 2.2);
+    }
   },
 
   _employeeLabel(e) {
     const f = e.task && e.task.order ? FOODS[e.task.order.foodType].icon : '';
+    const prefix = e.tired ? '😓 ' : '';
+    let base = '';
     switch (e.state) {
-      case ES.IDLE:                   return `💤`;
-      case ES.TO_STOVE_COOK:          return `→🔥 ${f}`;
-      case ES.TO_STOVE_PICKUP:        return `→🔥 get ${f}`;
-      case ES.TO_TABLE_DELIVER:       return `→🍽 ${f}`;
-      case ES.TO_TABLE_PICKUP_DIRTY:  return `→ dirty`;
-      case ES.TO_SINK_DROP:           return `→🚰 wash`;
-      default: return '';
+      case ES.IDLE:                   base = `💤`; break;
+      case ES.TO_STOVE_COOK:          base = `→🔥 ${f}`; break;
+      case ES.TO_STOVE_PICKUP:        base = `→🔥 get ${f}`; break;
+      case ES.TO_TABLE_DELIVER:       base = `→🍽 ${f}`; break;
+      case ES.TO_TABLE_PICKUP_DIRTY:  base = `→ dirty`; break;
+      case ES.TO_SINK_DROP:           base = `→🚰 wash`; break;
+      default: base = '';
+    }
+    return prefix + base;
+  },
+
+  /* ---- Tip floater (called from scene when a happy customer is leaving) ---- */
+  tipFloater(view, c, sx, sy) {
+    if (c.tipAwarded <= 0 || c.state !== CS.LEAVING) return;
+    view.getText('tip_' + c.id, `+$${c.tipAwarded}`, sx, sy - 50, {
+      fontFamily: 'system-ui', fontSize: '13px', fontStyle: 'bold',
+      color: '#4ade80', stroke: '#000000', strokeThickness: 3,
+    });
+  },
+
+  /* ---- Chef portrait (head + hair + hat), used in the recruit modal ---- */
+  chefPortrait(g, preset, cx, cy) {
+    const v = preset.visual || {};
+    const skin = v.skinColor != null ? v.skinColor : 0xfec9a7;
+    const headR = 18;
+
+    // Shoulders hint — small rounded rectangle under the head for framing.
+    g.fillStyle(0xffffff, 1);
+    g.fillRoundedRect(cx - 24, cy + headR - 4, 48, 18, 8);
+    g.lineStyle(2, COLORS.outline, 1);
+    g.strokeRoundedRect(cx - 24, cy + headR - 4, 48, 18, 8);
+    g.lineStyle(2.5, 0x4a90e2, 1);
+    g.lineBetween(cx - 6, cy + headR - 4, cx - 6, cy + headR + 14);
+    g.lineBetween(cx + 6, cy + headR - 4, cx + 6, cy + headR + 14);
+
+    // Head
+    g.fillStyle(skin, 1); g.fillCircle(cx, cy, headR);
+    g.lineStyle(2, COLORS.outline, 1); g.strokeCircle(cx, cy, headR);
+
+    const hatIdx = v.hat != null ? v.hat : 0;
+    const hairHidden = (hatIdx === 0 || hatIdx === 2);
+    if (v.hasHair && !hairHidden) {
+      g.fillStyle(v.hairColor != null ? v.hairColor : 0x3a2a1a, 1);
+      g.beginPath(); g.arc(cx, cy - 4, headR - 0.5, Math.PI + 0.25, -0.25, false); g.closePath();
+      g.fillPath();
+      g.lineStyle(1.5, COLORS.outline, 1); g.strokePath();
+    }
+
+    // Eyes + small smile so portraits feel like people, not mannequins.
+    g.fillStyle(0xffffff, 1);
+    g.fillCircle(cx - 5, cy, 4); g.fillCircle(cx + 5, cy, 4);
+    g.lineStyle(1, COLORS.outline, 1);
+    g.strokeCircle(cx - 5, cy, 4); g.strokeCircle(cx + 5, cy, 4);
+    g.fillStyle(0x1a1420, 1);
+    g.fillCircle(cx - 5, cy, 2); g.fillCircle(cx + 5, cy, 2);
+    g.lineStyle(2, COLORS.outline, 1);
+    g.beginPath(); g.arc(cx, cy + 5, 4, 0.2, Math.PI - 0.2, false); g.strokePath();
+
+    if (hatIdx === 0) {
+      // Classic chef toque.
+      g.fillStyle(0xf5f5f5, 1);
+      g.fillRoundedRect(cx - 14, cy - headR - 2, 28, 7, 2);
+      g.lineStyle(2, COLORS.outline, 1);
+      g.strokeRoundedRect(cx - 14, cy - headR - 2, 28, 7, 2);
+      g.fillStyle(0xffffff, 1);
+      g.fillCircle(cx - 8, cy - headR - 10, 8);
+      g.fillCircle(cx + 8, cy - headR - 11, 8);
+      g.fillCircle(cx,     cy - headR - 16, 7.5);
+      g.strokeCircle(cx - 8, cy - headR - 10, 8);
+      g.strokeCircle(cx + 8, cy - headR - 11, 8);
+      g.strokeCircle(cx,     cy - headR - 16, 7.5);
+    } else {
+      const hatColor = v.hatColor != null ? v.hatColor
+                      : (v.hairColor || 0xd64040);
+      Sprites._hat(g, { hat: hatIdx, hatColor }, cx, cy + (headR - 13), 0);
+    }
+  },
+
+  /* ---- Stat bar (tiny 10-segment progress) ---- */
+  statBar(g, x, y, w, h, value, max = 10) {
+    // Background track
+    g.fillStyle(0x000000, 0.35);
+    g.fillRoundedRect(x, y, w, h, 2);
+    // Filled segments (color shifts from red at 1 to green at 10).
+    const frac = clamp(value / max, 0, 1);
+    let col = 0x7cb342;               // green (strong)
+    if (value <= 3)      col = 0xd64040;  // red (weak)
+    else if (value <= 6) col = 0xffa94d;  // amber (mid)
+    g.fillStyle(col, 1);
+    g.fillRoundedRect(x + 1, y + 1, (w - 2) * frac, h - 2, 1);
+    // Segment ticks every 1 unit so 7 reads at a glance.
+    g.lineStyle(1, 0x000000, 0.3);
+    for (let i = 1; i < max; i++) {
+      const tx = x + (w * i) / max;
+      g.lineBetween(tx, y + 1, tx, y + h - 1);
     }
   },
 };
