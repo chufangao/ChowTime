@@ -12,6 +12,10 @@
  * Must load after both.
  */
 
+// Tools that physically alter the restaurant layout. Gated so the player
+// can only rearrange between days (sim.dayState === 'dayEnd').
+const LAYOUT_TOOLS = ['stove', 'table', 'chair', 'sink', 'move', 'remove'];
+
 /* ============================================================================
  * Sidebar — built from real Phaser interactive objects
  * ============================================================================
@@ -29,7 +33,6 @@ class Sidebar {
 
     this.toolBtns    = [];    // { def, rect, bg, iconG, label, cost, hit }
     this.trafficBtns = [];    // { mult, idx, rect, bg, label, hit }
-    this.pauseBtn    = null;
     this.speedBtn    = null;
 
     this._build();
@@ -61,13 +64,14 @@ class Sidebar {
     this.dynG = scene.add.graphics();
 
     // --- Tool buttons ---
-    const btnH = 40, gap = 5;
-    let by = TOP_H + 50;
+    const btnH = 34, gap = 4;
+    let by = TOP_H + 44;
     const defs = [
       { id: 'stove',  label: 'Stove',     cost: CONFIG.costs.stove,    color: 0x3a3a42, hint: 'cooks food' },
       { id: 'table',  label: 'Table',     cost: CONFIG.costs.table,    color: 0x8b5a2b, hint: 'holds plate' },
       { id: 'chair',  label: 'Chair',     cost: CONFIG.costs.chair,    color: 0x6a4a2a, hint: 'seat, needs table' },
       { id: 'sink',   label: 'Sink',      cost: CONFIG.costs.sink,     color: 0x5fa8d3, hint: 'washes plates' },
+      { id: 'move',   label: 'Move',      cost: 0,                     color: 0xd9a14a, hint: 'pick → place' },
       { id: 'remove', label: 'Remove',    cost: 0,                     color: 0x663333, hint: 'right-click' },
       { id: 'hire',   label: 'Hire Cook', cost: CONFIG.costs.employee, color: 0x4a90e2, hint: 'one more worker' },
     ];
@@ -88,18 +92,12 @@ class Sidebar {
       this.trafficBtns.push(this._makeTrafficBtn(mult, i, rect));
     });
 
-    // --- Pause + speed controls ---
+    // --- Speed control (full width; Pause was removed — the game already
+    //     pauses naturally during the day-end review). ---
     const psY  = tfY + tfH + 16;
-    const halfW = (bw - 6) / 2;
-    this.pauseBtn = this._makeControlBtn(
-      { x: bx, y: psY, w: halfW, h: 34 },
-      () => this.sim.spawnEnabled ? '⏸ Pause' : '▶ Resume',
-      () => this.sim.spawnEnabled ? 0x3d2d5c : 0x5a3d2d,
-      () => { this.sim.spawnEnabled = !this.sim.spawnEnabled; }
-    );
     this.speedBtn = this._makeControlBtn(
-      { x: bx + halfW + 6, y: psY, w: halfW, h: 34 },
-      () => `⏩ ${this.speed}×`,
+      { x: bx, y: psY, w: bw, h: 34 },
+      () => `⏩ Speed ${this.speed}×`,
       () => 0x3d2d5c,
       () => {
         const levels = CONFIG.speedLevels;
@@ -125,13 +123,16 @@ class Sidebar {
 
     // --- Top-of-screen readouts ---
     this.moneyText = scene.add.text(14, 12, '', {
-      font: 'bold 24px system-ui', color: '#ffd84d', stroke: '#000', strokeThickness: 3,
+      font: 'bold 22px system-ui', color: '#ffd84d', stroke: '#000', strokeThickness: 3,
     });
-    this.dayText = scene.add.text(120, 18, '', {
+    this.livesText = scene.add.text(110, 14, '', {
+      font: 'bold 18px system-ui', color: '#ff6b6b', stroke: '#000', strokeThickness: 3,
+    });
+    this.dayText = scene.add.text(200, 18, '', {
       font: 'bold 14px system-ui', color: '#9be8ff', stroke: '#000', strokeThickness: 3,
     });
-    this.statsText = scene.add.text(290, 18, '', {
-      font: 'bold 13px system-ui', color: '#ffffff', stroke: '#000', strokeThickness: 2,
+    this.statsText = scene.add.text(370, 18, '', {
+      font: 'bold 12px system-ui', color: '#ffffff', stroke: '#000', strokeThickness: 2,
     });
     this.tipText = scene.add.text(12, GAME_H - BOT_H + 8, '', {
       font: '12px monospace', color: '#c0b0e0',
@@ -140,11 +141,11 @@ class Sidebar {
 
   _makeToolBtn(def, rect) {
     const scene = this.scene;
-    const label = scene.add.text(rect.x + 10, rect.y + 5, def.label, {
-      font: 'bold 13px system-ui', color: '#ffffff',
+    const label = scene.add.text(rect.x + 10, rect.y + 3, def.label, {
+      font: 'bold 12px system-ui', color: '#ffffff',
     });
-    const cost = scene.add.text(rect.x + 10, rect.y + 22, '', {
-      font: '10px system-ui', color: '#c0b0e0',
+    const cost = scene.add.text(rect.x + 10, rect.y + 18, '', {
+      font: '9px system-ui', color: '#c0b0e0',
     });
     const hit = scene.add.zone(rect.x, rect.y, rect.w, rect.h)
       .setOrigin(0, 0)
@@ -153,9 +154,12 @@ class Sidebar {
       if (def.id === 'hire') {
         // Route through the recruit modal; the scene wires it at create time.
         if (this.scene.recruitModal) this.scene.recruitModal.open();
-      } else {
-        this.tool = (this.tool === def.id) ? null : def.id;
+        return;
       }
+      // Layout tools are locked mid-shift so the player can't rearrange
+      // underneath live customers. Silently ignore the click.
+      if (LAYOUT_TOOLS.includes(def.id) && this.sim.dayState !== 'dayEnd') return;
+      this.tool = (this.tool === def.id) ? null : def.id;
     });
     return { def, rect, label, cost, hit };
   }
@@ -193,28 +197,34 @@ class Sidebar {
     const sim = this.sim;
 
     // Tool buttons
+    const layoutLocked = sim.dayState !== 'dayEnd';
     for (const tb of this.toolBtns) {
       const { def, rect, label, cost } = tb;
-      const selected = this.tool === def.id;
+      const isLayout = LAYOUT_TOOLS.includes(def.id);
+      const disabled = isLayout && layoutLocked;
+      const selected = this.tool === def.id && !disabled;
       g.fillStyle(0x000000, 0.25);
       g.fillRoundedRect(rect.x + 2, rect.y + 3, rect.w, rect.h, 6);
-      g.fillStyle(selected ? COLORS.uiSelected : COLORS.uiPanel, 1);
+      const fill = disabled ? 0x2a2233 : (selected ? COLORS.uiSelected : COLORS.uiPanel);
+      g.fillStyle(fill, disabled ? 0.7 : 1);
       g.fillRoundedRect(rect.x, rect.y, rect.w, rect.h, 6);
-      g.lineStyle(2, COLORS.outline, 0.6);
+      g.lineStyle(2, COLORS.outline, disabled ? 0.3 : 0.6);
       g.strokeRoundedRect(rect.x, rect.y, rect.w, rect.h, 6);
-      // Icon swatch
-      g.fillStyle(def.color, 1);
-      g.fillRoundedRect(rect.x + rect.w - 36, rect.y + 6, 28, 28, 4);
-      g.lineStyle(2, COLORS.outline, 1);
-      g.strokeRoundedRect(rect.x + rect.w - 36, rect.y + 6, 28, 28, 4);
-      label.setColor(selected ? '#1a1428' : '#ffffff');
+      // Icon swatch — dimmed when disabled.
+      g.fillStyle(def.color, disabled ? 0.35 : 1);
+      g.fillRoundedRect(rect.x + rect.w - 32, rect.y + 5, 24, 24, 4);
+      g.lineStyle(2, COLORS.outline, disabled ? 0.4 : 1);
+      g.strokeRoundedRect(rect.x + rect.w - 32, rect.y + 5, 24, 24, 4);
+      label.setColor(disabled ? '#6a5a8a' : (selected ? '#1a1428' : '#ffffff'));
       let costStr = '';
-      if (def.cost > 0) {
+      if (disabled) {
+        costStr = 'between days only';
+      } else if (def.cost > 0) {
         costStr = `$${def.cost}`;
         if (sim.money < def.cost) costStr += ' ❌';
       } else if (def.hint) costStr = def.hint;
       cost.setText(costStr);
-      cost.setColor(selected ? '#1a1428' : '#c0b0e0');
+      cost.setColor(disabled ? '#6a5a8a' : (selected ? '#1a1428' : '#c0b0e0'));
     }
 
     // Traffic bar
@@ -231,9 +241,9 @@ class Sidebar {
       label.setColor(selected ? '#ffffff' : '#c0b0e0');
     }
 
-    // Pause + speed
-    for (const cb of [this.pauseBtn, this.speedBtn]) {
-      const { rect, label, textFn, colorFn } = cb;
+    // Speed
+    {
+      const { rect, label, textFn, colorFn } = this.speedBtn;
       g.fillStyle(0x000000, 0.25);
       g.fillRoundedRect(rect.x + 2, rect.y + 3, rect.w, rect.h, 5);
       g.fillStyle(colorFn(), 1);
@@ -246,6 +256,10 @@ class Sidebar {
     // Readouts
     const live = sim.customers.filter(c => c.alive).length;
     this.moneyText.setText(`$${sim.money}`);
+    // Lives as literal hearts so a glance reads the state without parsing.
+    let hearts = '';
+    for (let i = 0; i < sim.livesMax; i++) hearts += i < sim.lives ? '❤️' : '🖤';
+    this.livesText.setText(hearts);
     let dayLine;
     if (sim.dayState === 'spawning') {
       dayLine = `Day ${sim.day}  ·  ${sim.daySpawned}/${sim.dayQuota}`;
@@ -1190,7 +1204,9 @@ class DayEndModal {
       `Check: ${ev.statLabel || ev.stat.toUpperCase()} · DC ${dc}   (1d10 + stat vs DC)`
     ).setVisible(true);
 
-    // Chef chips — one per eligible chef.
+    // Chef chips — one per eligible chef. Selection state is loud on
+    // purpose: before the roll the player needs zero doubt about which chef
+    // they've picked.
     const chefs = sim.eligibleChefsForEvent();
     for (let i = 0; i < this._chefChips.length; i++) {
       const chip = this._chefChips[i];
@@ -1200,13 +1216,32 @@ class DayEndModal {
       const r = chip.rect;
       const picked = sim.eventOutcome && sim.eventOutcome.chef === chef;
       const locked = !!sim.eventOutcome;
-      const color  = picked ? 0x4a9e5c : (locked ? 0x3d2d5c : 0x4a3d7a);
-      g.fillStyle(0x000000, 0.25); g.fillRoundedRect(r.x + 1, r.y + 2, r.w, r.h, 4);
-      g.fillStyle(color, 1);       g.fillRoundedRect(r.x, r.y, r.w, r.h, 4);
-      g.lineStyle(2, COLORS.outline, 0.6);
+
+      // Glow/drop shadow for selected — draw a wide soft backing first.
+      if (picked) {
+        g.fillStyle(0xffd84d, 0.35);
+        g.fillRoundedRect(r.x - 4, r.y - 3, r.w + 8, r.h + 6, 8);
+      } else {
+        g.fillStyle(0x000000, 0.25); g.fillRoundedRect(r.x + 1, r.y + 2, r.w, r.h, 4);
+      }
+      // Fill: bright green for picked; medium purple for live options;
+      // darker and nearly flat for rejected options after lock.
+      const fill = picked ? 0x5fd97e : (locked ? 0x322a42 : 0x5a4ab0);
+      g.fillStyle(fill, 1); g.fillRoundedRect(r.x, r.y, r.w, r.h, 4);
+      // Border: thick yellow ring for selected; thin for everything else.
+      if (picked) {
+        g.lineStyle(3, 0xffd84d, 1);
+      } else {
+        g.lineStyle(2, COLORS.outline, 0.6);
+      }
       g.strokeRoundedRect(r.x, r.y, r.w, r.h, 4);
+
       const statVal = chef.effStat(ev.stat);
-      chip.label.setText(`${chef.name.split(' ')[0]}  (${ev.statLabel || ev.stat.toUpperCase()} ${Math.round(statVal)})`);
+      const prefix  = picked ? '✓ ' : '';
+      chip.label.setText(
+        `${prefix}${chef.name.split(' ')[0]}  (${ev.statLabel || ev.stat.toUpperCase()} ${Math.round(statVal)})`
+      );
+      chip.label.setColor(picked ? '#1a1428' : (locked ? '#8888a0' : '#ffffff'));
       chip.label.setVisible(true);
       chip.hit.setVisible(true);
       if (locked) chip.hit.disableInteractive(); else chip.hit.setInteractive();
@@ -1227,6 +1262,101 @@ class DayEndModal {
       this._eventOutcome.setColor('#c0b0e0');
       this._eventOutcome.setVisible(true);
     }
+  }
+}
+
+
+/* ============================================================================
+ * GameOverModal — run-ending screen, shown when sim.lives hits 0
+ * ============================================================================
+ * Simpler than the day-end modal: no event card, no chef assignment. Shows
+ * the final run totals and a Restart button that reloads the page for a
+ * clean state.
+ */
+class GameOverModal {
+  constructor(scene, sim) {
+    this.scene = scene;
+    this.sim   = sim;
+    this.isOpen = false;
+
+    this._g = scene.add.graphics();
+    this._g.setDepth(990);        // above DayEndModal (980)
+    this._g.setVisible(false);
+
+    const pw = 460, ph = 260;
+    const px = Math.floor((GAME_W - pw) / 2);
+    const py = Math.floor((GAME_H - ph) / 2);
+    this._rect = { x: px, y: py, w: pw, h: ph };
+
+    this._title = scene.add.text(px + pw / 2, py + 18, '☠  Game Over  ☠', {
+      font: 'bold 26px system-ui', color: '#ff6666', stroke: '#000', strokeThickness: 4,
+    }).setOrigin(0.5, 0).setDepth(992).setVisible(false);
+
+    this._subtitle = scene.add.text(px + pw / 2, py + 60, 'Too many hangry customers walked out.', {
+      font: 'italic 13px system-ui', color: '#c0b0e0',
+    }).setOrigin(0.5, 0).setDepth(992).setVisible(false);
+
+    this._stats = scene.add.text(px + pw / 2, py + 96, '', {
+      font: '14px system-ui', color: '#ffffff', align: 'center',
+    }).setOrigin(0.5, 0).setDepth(992).setVisible(false);
+
+    const bw = 160, bh = 44;
+    const bx = px + pw / 2 - bw / 2;
+    const by = py + ph - 62;
+    this._btnRect = { x: bx, y: by, w: bw, h: bh };
+    this._btnLabel = scene.add.text(bx + bw / 2, by + bh / 2, '↻ Restart', {
+      font: 'bold 18px system-ui', color: '#ffffff',
+    }).setOrigin(0.5, 0.5).setDepth(993).setVisible(false);
+    this._btnHit = scene.add.zone(bx, by, bw, bh)
+      .setOrigin(0, 0)
+      .setInteractive({ useHandCursor: true })
+      .setDepth(993);
+    this._btnHit.on('pointerdown', () => window.location.reload());
+    this._btnHit.disableInteractive();
+    this._btnHit.setVisible(false);
+  }
+
+  pointInPanel(x, y) {
+    const r = this._rect;
+    return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+  }
+
+  tick() {
+    if (this.sim.gameOver && !this.isOpen) this.open();
+    if (this.isOpen) this.render();
+  }
+
+  open() {
+    this.isOpen = true;
+    this._g.setVisible(true);
+    this._title.setVisible(true);
+    this._subtitle.setVisible(true);
+    this._stats.setVisible(true);
+    this._btnLabel.setVisible(true);
+    this._btnHit.setInteractive();
+    this._btnHit.setVisible(true);
+  }
+
+  render() {
+    const g = this._g; g.clear();
+    const { x, y, w, h } = this._rect;
+
+    g.fillStyle(0x000000, 0.75); g.fillRect(0, 0, GAME_W, GAME_H);
+    g.fillStyle(COLORS.uiBg, 1); g.fillRoundedRect(x, y, w, h, 12);
+    g.lineStyle(3, 0xff6666, 1); g.strokeRoundedRect(x, y, w, h, 12);
+
+    const sim = this.sim;
+    this._stats.setText(
+      `Day reached:  ${sim.day}\n` +
+      `Final cash:  $${sim.money}\n` +
+      `Customers served:  ${sim.runStats.served}\n` +
+      `Tips earned:  $${sim.runStats.tipsTotal}`
+    );
+
+    const r = this._btnRect;
+    g.fillStyle(0x000000, 0.3); g.fillRoundedRect(r.x + 2, r.y + 3, r.w, r.h, 8);
+    g.fillStyle(0x4a9e5c, 1);   g.fillRoundedRect(r.x, r.y, r.w, r.h, 8);
+    g.lineStyle(2, COLORS.outline, 0.8); g.strokeRoundedRect(r.x, r.y, r.w, r.h, 8);
   }
 }
 
@@ -1266,6 +1396,9 @@ class GameScene extends Phaser.Scene {
     // --- Day-end modal: auto-opens when sim.dayState flips to 'dayEnd'. ---
     this.dayEndModal = new DayEndModal(this, this.sim);
 
+    // --- Game over modal: auto-opens when sim.gameOver becomes true. ---
+    this.gameOverModal = new GameOverModal(this, this.sim);
+
     // --- Build the view context passed to every sprite call ---
     this._view = {
       g:       this.gObjects,
@@ -1277,6 +1410,10 @@ class GameScene extends Phaser.Scene {
 
     // --- Hover state (for the placement preview diamond) ---
     this.hover = null;
+    // --- Move tool pickup state: once a building is picked, stores the
+    //     source tile so the next click drops it. Cleared on drop, right-
+    //     click, ESC, or tool switch.
+    this.movingFrom = null;
 
     // --- Input: only the grid area. Sidebar zones handle themselves. ---
     this.input.mouse.disableContextMenu();
@@ -1289,12 +1426,27 @@ class GameScene extends Phaser.Scene {
     this.sim.update(dt);
     this._frame++;
 
+    // Switching tools while mid-pickup should drop the pickup state so the
+    // source tile marker doesn't linger.
+    if (this.sidebar.tool !== 'move' && this.movingFrom) this.movingFrom = null;
+
+    // When the day starts, any active layout-tool selection and pickup
+    // should clear so the sidebar reads as "idle shift" without stale
+    // highlights.
+    if (this.sim.dayState !== 'dayEnd') {
+      if (this.sidebar.tool && LAYOUT_TOOLS.includes(this.sidebar.tool)) {
+        this.sidebar.tool = null;
+      }
+      if (this.movingFrom) this.movingFrom = null;
+    }
+
     this._view.time = this.sim.time;
 
     this._drawScene();
     this.sidebar.refresh();
     if (this.recruitModal.isOpen) this.recruitModal.render();
     this.dayEndModal.tick();
+    this.gameOverModal.tick();
     this._cullTexts();
   }
 
@@ -1302,6 +1454,7 @@ class GameScene extends Phaser.Scene {
   _onPointerMove(p) {
     // Don't track grid hover while a modal is up (day-end modal only blocks
     // the hover diamond when the cursor is over the panel itself).
+    if (this.gameOverModal && this.gameOverModal.isOpen) { this.hover = null; return; }
     if (this.recruitModal && this.recruitModal.isOpen) { this.hover = null; return; }
     if (this.dayEndModal && this.dayEndModal.isOpen &&
         this.dayEndModal.pointInPanel(p.x, p.y))       { this.hover = null; return; }
@@ -1311,6 +1464,8 @@ class GameScene extends Phaser.Scene {
     this.hover = { x: tile.x, y: tile.y, valid: this._isToolValidAt(tile.x, tile.y) };
   }
   _onPointerDown(p) {
+    // Run-ending modal fully blocks all non-modal input.
+    if (this.gameOverModal && this.gameOverModal.isOpen) return;
     // Recruit modal fully owns input while open.
     if (this.recruitModal && this.recruitModal.isOpen) return;
     // DayEndModal leaves the sidebar + exposed grid cells live so players
@@ -1321,17 +1476,46 @@ class GameScene extends Phaser.Scene {
     // Sidebar clicks are handled by the interactive Zones inside Sidebar.
     if (p.x >= GAME_W - UI_W) return;
     const tile = screenToTile(p.x, p.y); if (!tile) return;
-    if (p.rightButtonDown()) { this.sim.removeBuildingAt(tile.x, tile.y); return; }
+    // Layout mutations are only allowed during the day-end review.
+    const editingAllowed = this.sim.dayState === 'dayEnd';
+    if (p.rightButtonDown()) {
+      // Right-click always cancels a pending move first.
+      if (this.movingFrom) { this.movingFrom = null; return; }
+      if (!editingAllowed) return;
+      this.sim.removeBuildingAt(tile.x, tile.y);
+      return;
+    }
     const tool = this.sidebar.tool;
     if (!tool) return;
+    if (!editingAllowed) return;
     if (tool === 'remove') this.sim.removeBuildingAt(tile.x, tile.y);
+    else if (tool === 'move') this._handleMoveClick(tile.x, tile.y);
     else if (['stove','table','chair','sink'].includes(tool)) this.sim.placeBuilding(tool, tile.x, tile.y);
+  }
+  _handleMoveClick(tx, ty) {
+    if (!this.movingFrom) {
+      // First click: try to pick up. Only mark as "picked" if there's a
+      // movable building under the click.
+      const t = this.sim.grid.getTile(tx, ty);
+      if (!t || !t.building) return;
+      this.movingFrom = { x: tx, y: ty };
+    } else {
+      // Second click: attempt to place. On failure, keep the pickup active
+      // so the player can try a different tile.
+      const res = this.sim.moveBuilding(this.movingFrom.x, this.movingFrom.y, tx, ty);
+      if (res.ok) this.movingFrom = null;
+    }
   }
   _isToolValidAt(x, y) {
     const tool = this.sidebar.tool;
     if (!tool) return false;
     const t = this.sim.grid.getTile(x, y); if (!t) return false;
     if (tool === 'remove') return !!t.building;
+    if (tool === 'move') {
+      if (!this.movingFrom) return !!t.building;           // phase 1: pick up
+      if (this.movingFrom.x === x && this.movingFrom.y === y) return false;
+      return !t.building && t.type !== 'spawn';            // phase 2: place
+    }
     if (t.building) return false;
     if (t.type === 'spawn') return false;
     return true;
@@ -1381,6 +1565,12 @@ class GameScene extends Phaser.Scene {
       }
     }
 
+    // Source-tile marker while a move is mid-pickup.
+    if (this.movingFrom) {
+      const { sx, sy } = gridToScreen(this.movingFrom.x, this.movingFrom.y);
+      Sprites.pickupMarker(view, sx, sy);
+    }
+
     // Hover preview
     if (this.sidebar.tool && this.hover) {
       const { sx, sy } = gridToScreen(this.hover.x, this.hover.y);
@@ -1428,15 +1618,20 @@ class GameScene extends Phaser.Scene {
 
 
 /* ============================================================================
- * Bootstrap
+ * Bootstrap — exposed as window.startChowTime() so the HTML start menu can
+ * decide when to launch the game.
  * ============================================================================ */
-new Phaser.Game({
-  type: Phaser.AUTO,
-  width: GAME_W,
-  height: GAME_H,
-  backgroundColor: '#1a1428',
-  parent: 'game',
-  scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH },
-  scene: GameScene,
-  render: { pixelArt: false, antialias: true },
-});
+window.startChowTime = function () {
+  if (window.__chowTimeInstance) return window.__chowTimeInstance;
+  window.__chowTimeInstance = new Phaser.Game({
+    type: Phaser.AUTO,
+    width: GAME_W,
+    height: GAME_H,
+    backgroundColor: '#1a1428',
+    parent: 'game',
+    scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH },
+    scene: GameScene,
+    render: { pixelArt: false, antialias: true },
+  });
+  return window.__chowTimeInstance;
+};

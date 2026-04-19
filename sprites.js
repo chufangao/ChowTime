@@ -47,7 +47,12 @@ const GRID_OX = LEFT_MARGIN + ROWS * ISO_TW;              // 312
 const GRID_OY = TOP_H + TOP_MARGIN + ISO_TH;              // 92
 
 const GAME_W = GRID_OX + COLS * ISO_TW + RIGHT_MARGIN + UI_W;
-const GAME_H = TOP_H + TOP_MARGIN + (COLS + ROWS) * ISO_TH + BOT_MARGIN + BOT_H;
+// Canvas height is max(grid height, min needed by sidebar). The sidebar
+// grew beyond the iso-grid height once we added the Move tool and Lives
+// readout, so we extend the canvas downward to keep all controls visible.
+const GAME_H_GRID = TOP_H + TOP_MARGIN + (COLS + ROWS) * ISO_TH + BOT_MARGIN + BOT_H;
+const GAME_H_MIN  = 580;    // chosen to fit every sidebar section
+const GAME_H = Math.max(GAME_H_GRID, GAME_H_MIN);
 
 /* ---- Color palettes -------------------------------------------------------- */
 const COLORS = {
@@ -173,6 +178,15 @@ const Sprites = {
     drawDiamond(view.overlay, sx, sy, ISO_TW - 2, ISO_TH - 1,
                 ok ? 0x6bcf7f : 0xff4d4d,
                 ok ? 0x3ca35c : 0xa63030, 3, 0.22, pulse);
+  },
+
+  /* ---- Source-tile marker when the Move tool has a pickup active ---- */
+  pickupMarker(view, sx, sy) {
+    const pulse = 0.6 + 0.35 * Math.sin(view.time * 5);
+    // Inner translucent fill so the tile reads as "held" distinctly from
+    // the hover preview.
+    drawDiamond(view.overlay, sx, sy, ISO_TW - 3, ISO_TH - 2,
+                0xffd84d, 0xc59b2e, 4, 0.18, pulse);
   },
 
   /* ---- Stove ---- */

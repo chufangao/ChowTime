@@ -889,8 +889,8 @@ class Customer extends Entity {
     }
     this.tipAwarded += tip;
     sim.money       += price + tip;
-    sim.stats.tipsTotal += tip;
-    sim.stats.served++;
+    sim.stats.tipsTotal += tip; sim.runStats.tipsTotal += tip;
+    sim.stats.served++;         sim.runStats.served++;
     // Credit the delivering chef's end-of-day report (career + today).
     const cook = this.deliveredBy;
     if (cook) {
@@ -956,7 +956,19 @@ class Customer extends Entity {
       if (o.readyStove) o.readyStove = null;
     }
 
-    if (reason !== 'happy') sim.stats.angry++;
+    // 'angry' is the only non-happy reason now (rage-max). It both logs the
+    // stat and costs a life.
+    if (reason === 'angry') {
+      sim.stats.angry++; sim.runStats.angry++;
+      if (!sim.gameOver) {
+        sim.lives--;
+        if (sim.lives <= 0) {
+          sim.lives = 0;
+          sim.gameOver = true;
+          sim.spawnEnabled = false;
+        }
+      }
+    }
     // Happy-path earnings are credited per course in _consumePlate; nothing
     // else to do here beyond the state transition and exit path.
 
@@ -1183,7 +1195,7 @@ class Employee extends Entity {
       }
       case ES.TO_SINK_DROP: {
         if (t.sink && t.sink.tile && !t.sink.isWashing()) {
-          t.sink.startWashing(); sim.stats.plates++;
+          t.sink.startWashing(); sim.stats.plates++; sim.runStats.plates++;
         } else if (t.sink) { t.sink.reservedFor = null; }
         this.carryingDirty = false;
         this.task = null; this.state = ES.IDLE; break;
@@ -1233,6 +1245,13 @@ class Simulation {
     this.trafficMultiplier = 1;
     this.money = CONFIG.startingMoney;
     this.stats = { served: 0, angry: 0, plates: 0, tipsTotal: 0 };
+    // Run-level totals + lives. Lives tick down when a customer leaves angry
+    // from maxed-out rage (not from furniture being yanked — that's the
+    // player's own doing). At zero, sim.gameOver is set and spawning halts.
+    this.runStats = { served: 0, angry: 0, plates: 0, tipsTotal: 0, daysCompleted: 0 };
+    this.livesMax = 3;
+    this.lives    = 3;
+    this.gameOver = false;
     this.day           = 1;
     this.daySpawned    = 0;
     this.dayStartMoney = CONFIG.startingMoney;
@@ -1305,12 +1324,38 @@ class Simulation {
     return { ok: true };
   }
 
+  // Move an existing building from (fx,fy) to (tx,ty), preserving the
+  // instance so state (e.g., a plate on a table, a cooking stove) stays
+  // intact. Refuses when the target is occupied or the source is mid-task —
+  // moving a stove mid-cook would orphan the order.
+  moveBuilding(fx, fy, tx, ty) {
+    if (fx === tx && fy === ty) return { ok: false, reason: 'same-tile' };
+    const src = this.grid.getTile(fx, fy);
+    if (!src || !src.building) return { ok: false, reason: 'empty-source' };
+    const b = src.building;
+    if (b.type === 'stove' && (b.cooking || b.reservedFor)) return { ok: false, reason: 'busy' };
+    if (b.type === 'sink'  && (b.washing || b.reservedFor)) return { ok: false, reason: 'busy' };
+    if (b.type === 'chair' && b.occupyingCustomer)          return { ok: false, reason: 'busy' };
+    if (b.type === 'table' && (b.occupyingCustomer || b.cleaningAssigned)) return { ok: false, reason: 'busy' };
+    if (!this.grid.inBounds(tx, ty)) return { ok: false, reason: 'out-of-bounds' };
+    const dst = this.grid.getTile(tx, ty);
+    if (!dst || dst.type === 'wall') return { ok: false, reason: 'out-of-bounds' };
+    if (dst.type === 'spawn') return { ok: false, reason: 'blocks-door' };
+    if (dst.building)         return { ok: false, reason: 'occupied' };
+    // Pop off source tile, drop on target. grid.placeBuilding reuses the
+    // existing instance; it does not allocate.
+    this.grid.removeBuildingAt(fx, fy);
+    this.grid.placeBuilding(b, tx, ty);
+    return { ok: true };
+  }
+
   removeBuildingAt(x, y) {
     const b = this.grid.removeBuildingAt(x, y); if (!b) return false;
     b.onRemoved(this);
     const i = this.buildings.indexOf(b); if (i >= 0) this.buildings.splice(i, 1);
-    if (b.type === 'chair' && b.occupyingCustomer) b.occupyingCustomer.leave(this, 'angry');
-    if (b.type === 'table' && b.occupyingCustomer) b.occupyingCustomer.leave(this, 'angry');
+    // Layout edits can only happen during dayEnd (enforced in the scene's
+    // input layer), when no customers are alive — so occupyingCustomer is
+    // always null here and no evict path is needed.
     this.money += Math.floor((CONFIG.costs[b.type] || 0) * CONFIG.refundRatio);
     return true;
   }
@@ -1403,6 +1448,7 @@ class Simulation {
     }
     this.todayProfile = profile;
 
+    this.runStats.daysCompleted++;
     this.day++;
     this.dayQuota      = this._computeDayQuota(this.day);
     this.daySpawned    = 0;
@@ -1477,7 +1523,7 @@ class Simulation {
 
   update(dt) {
     this.time += dt;
-    if (this.spawnEnabled) {
+    if (this.spawnEnabled && !this.gameOver) {
       if (this.dayState === 'spawning') {
         this.spawnTimer -= dt;
         if (this.spawnTimer <= 0) {
