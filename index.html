@@ -193,11 +193,20 @@
   <div id="game-container"><div id="game"></div></div>
 </div>
 
-<!-- Load order: game.js defines COLS/ROWS/CONFIG/sim classes. sprites.js
-     computes canvas dimensions from those and defines Sprites. scene.js
-     exposes startChowTime() as the launch hook. -->
-<script src="./game.js"></script>
+<!-- Load order: src/** files define the headless simulation (constants,
+     abilities, events, chefs, grid, buildings, entities, sim root).
+     sprites.js computes canvas dimensions from those and defines Sprites.
+     scene.js exposes startChowTime() as the launch hook. -->
+<script src="./src/data/constants.js"></script>
+<script src="./src/data/abilities.js"></script>
+<script src="./src/data/events_forecasts.js"></script>
+<script src="./src/data/chef_presets.js"></script>
+<script src="./src/sim/grid.js"></script>
+<script src="./src/entities/buildings.js"></script>
 <script src="./sprites.js"></script>
+<script src="./src/entities/customer.js"></script>
+<script src="./src/entities/employee.js"></script>
+<script src="./src/sim/simulation.js"></script>
 <script src="./scene.js"></script>
 <script>
   // Bootstrap: scene.js does not auto-start the Phaser game; we call it

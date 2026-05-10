@@ -1,0 +1,13 @@
+{
+  "name": "chow-time",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Headless tests for the Chow Time restaurant simulation. Browser game runs from index.html and needs no install.",
+  "scripts": {
+    "test": "node --test 'test/**/*.test.js'",
+    "test:unit": "node --test 'test/unit/*.test.js'",
+    "test:integration": "node --test 'test/integration/*.test.js'",
+    "test:scenarios": "node --test 'test/scenarios/*.test.js'",
+    "test:fuzz": "node --test 'test/fuzz/*.test.js'"
+  }
+}
