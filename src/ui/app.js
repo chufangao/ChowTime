@@ -173,6 +173,11 @@ class App {
       t = this.scene.add.text(x, y, str, style || {});
       if (this.layer && this.layer.add) this.layer.add(t);
       if (t.setDepth) t.setDepth(this._textDepth || 902);
+      // Match the scene's camera zoom (set by GameScene._setupCamera) so
+      // glyphs rasterise at canvas-pixel resolution rather than the small
+      // logical size that gets upscaled = blurry.
+      const res = this.scene && this.scene._textResolution;
+      if (res && res > 1 && t.setResolution) t.setResolution(res);
       this._textPool.set(key, t);
     } else {
       if (t.setText)     t.setText(str);

@@ -19,6 +19,10 @@ class Building {
     this.facing = null;
   }
   update() {} onPlaced(sim) { this.placedAt = sim.time; } onRemoved() {}
+  // Broken buildings work at half speed: stove cook time, sink wash time, and
+  // table eat time all multiply by this. Centralized so the constant lives in
+  // one place instead of three `b.broken ? 2 : 1` literals.
+  get workMult() { return this.broken ? 2 : 1; }
 }
 
 class Stove extends Building {
@@ -34,8 +38,7 @@ class Stove extends Building {
     const mult = clamp(1.3 - 0.06 * dex, 0.5, 1.3);
     const aMult = cook ? abilityMult(cook, 'cookTimeMult', order.foodType) : 1;
     const profMult = (sim && sim.todayProfile && sim.todayProfile.cookTimeMult) || 1;
-    const brokenMult = this.broken ? 2 : 1;
-    const cookTime = food.cookTime * mult * aMult * profMult * brokenMult;
+    const cookTime = food.cookTime * mult * aMult * profMult * this.workMult;
     const quality  = cook ? computeQuality(cook.effStat('int')) : 1.0;
     this.cooking = { order, timeLeft: cookTime, total: cookTime, quality };
     this.reservedFor = null;
@@ -185,7 +188,7 @@ class Sink extends Building {
   isAvailable() { return !this.washing && !this.reservedFor; }
   isWashing()   { return this.washing !== null; }
   startWashing() {
-    const t = this.broken ? 4.0 : 2.0;
+    const t = 2.0 * this.workMult;
     this.washing = { timeLeft: t, total: t };
     this.reservedFor = null;
   }

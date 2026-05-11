@@ -63,6 +63,11 @@ class TopBar {
     if (!t) {
       t = this.scene.add.text(x, y, str, style || {});
       if (t.setDepth) t.setDepth(952);
+      // Match the scene's camera zoom (set by GameScene._setupCamera) so
+      // glyphs rasterise at canvas-pixel resolution rather than the small
+      // logical size that gets upscaled = blurry.
+      const res = this.scene && this.scene._textResolution;
+      if (res && res > 1 && t.setResolution) t.setResolution(res);
       this._textPool.set(key, t);
     } else {
       if (t.setText)     t.setText(str);
@@ -88,7 +93,10 @@ class TopBar {
     if (g && g.clear) g.clear();
 
     const PAD       = 6;
-    const BTN_W     = 64;
+    // BTN_W matches TOOL_W so all six panel launchers fit in the center gap
+    // when the canvas is at its minimum width. With BTN_W=64 the start_day
+    // and midday_event launchers got clipped by the rightLeftEdge cull below.
+    const BTN_W     = 52;
     const TOOL_W    = 52;
     const SPEED_W   = 56;
     const BTN_GAP   = 4;

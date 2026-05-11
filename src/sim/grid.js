@@ -11,10 +11,19 @@ class Grid {
       for (let x = 0; x < cols; x++) row.push({ x, y, type: 'floor', building: null });
       this.tiles.push(row);
     }
+    // Monotonically increasing counter bumped whenever a tile type changes.
+    // FloorRenderer reads this to decide whether to reconcile its sprites,
+    // replacing the old per-frame 144-tile hash in scene.js.
+    this.floorVersion = 0;
   }
   inBounds(x, y) { return x >= 0 && x < this.cols && y >= 0 && y < this.rows; }
   getTile(x, y) { return this.inBounds(x, y) ? this.tiles[y][x] : null; }
-  setType(x, y, type) { const t = this.getTile(x, y); if (t) t.type = type; }
+  setType(x, y, type) {
+    const t = this.getTile(x, y);
+    if (!t || t.type === type) return;
+    t.type = type;
+    this.floorVersion++;
+  }
   isWalkable(x, y) {
     const t = this.getTile(x, y);
     if (!t || t.type === 'wall' || t.type === 'gap') return false;

@@ -14,7 +14,10 @@
     font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
     min-height: 100%;
   }
+  html, body { height: 100%; }
   body { overflow-y: auto; }
+  /* When the game view is on, lock scroll so the canvas owns the viewport. */
+  body.in-game { overflow: hidden; }
 
   /* ----- Start menu ----- */
   #menu {
@@ -108,53 +111,64 @@
   .play-btn:hover { transform: translateY(-2px); box-shadow: 0 7px 0 #2e5e36, 0 12px 28px rgba(0,0,0,0.5); }
   .play-btn:active { transform: translateY(3px); box-shadow: 0 2px 0 #2e5e36, 0 4px 10px rgba(0,0,0,0.4); }
 
-  /* ----- Game view (hidden until Play clicked) ----- */
+  /* ----- Game view (hidden until Play clicked) -----
+   * When active, fills the viewport. The Phaser canvas (FIT scale mode)
+   * preserves the iso aspect ratio with letterbox/pillarbox bands rather
+   * than stretching the diamond grid. */
   #app {
     display: none;
+    position: fixed;
+    inset: 0;
     flex-direction: column;
-    align-items: center;
-    padding: 10px 12px 30px;
   }
   #app.on { display: flex; }
+  /* Floating "← Menu" affordance over the top-left of the canvas. The
+   * in-game HUD lives inside the Phaser canvas, so we keep the HTML
+   * chrome minimal and out of the way. */
   .top-bar {
-    width: 100%;
-    max-width: 1200px;
+    position: absolute;
+    top: 8px;
+    left: 10px;
+    z-index: 10;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    margin-bottom: 10px;
-    padding: 0 4px;
+    gap: 10px;
+    pointer-events: none;  /* let the canvas receive clicks except on the button */
   }
   .app-title {
-    font-size: 15px;
+    font-size: 13px;
     font-weight: 700;
     color: #ffd84d;
     letter-spacing: 0.5px;
+    text-shadow: 0 1px 0 rgba(0, 0, 0, 0.6);
   }
-  .app-title .subtle { color: #8888a0; font-weight: 400; font-style: italic; margin-left: 8px; font-size: 12px; }
+  .app-title .subtle { color: #c0b0e0; font-weight: 400; font-style: italic; margin-left: 6px; font-size: 11px; }
   .menu-btn {
-    background: #3d2d5c;
+    pointer-events: auto;
+    background: rgba(61, 45, 92, 0.85);
     color: #fff;
     border: 2px solid #6b5ba8;
     border-radius: 6px;
-    padding: 6px 14px;
+    padding: 5px 12px;
     cursor: pointer;
     font-size: 12px;
     font-family: inherit;
+    backdrop-filter: blur(4px);
   }
-  .menu-btn:hover { background: #4a3d7a; }
+  .menu-btn:hover { background: rgba(74, 61, 122, 0.95); }
 
   #game-container {
-    border: 2px solid #6b5ba8;
-    border-radius: 10px;
+    flex: 1 1 auto;
+    width: 100%;
     overflow: hidden;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
     background: #1a1428;
   }
-  /* Phaser will inject its canvas inside #game; center it. */
-  #game { display: flex; justify-content: center; }
+  /* Phaser injects its canvas inside #game; fill the container so FIT scaling
+   * has a real parent size to target. */
+  #game { width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; }
+  #game canvas { display: block; }
 </style>
-<script src="https://cdn.jsdelivr.net/npm/phaser@3.70.0/dist/phaser.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/phaser@4.1.0/dist/phaser.min.js"></script>
 </head>
 <body>
 
@@ -230,6 +244,12 @@
 <script src="./src/ui/apps/start_day_app.js"></script>
 <script src="./src/ui/apps/midday_event_app.js"></script>
 <script src="./src/ui/apps/game_over_app.js"></script>
+<script src="./src/view/texture_baker.js"></script>
+<script src="./src/view/floor_renderer.js"></script>
+<script src="./src/view/world_renderer.js"></script>
+<script src="./src/scenes/boot_scene.js"></script>
+<script src="./src/scenes/preload_scene.js"></script>
+<script src="./src/scenes/ui_scene.js"></script>
 <script src="./scene.js"></script>
 <script>
   // Bootstrap: scene.js does not auto-start the Phaser game; we call it
@@ -237,9 +257,13 @@
   const menu = document.getElementById('menu');
   const app  = document.getElementById('app');
 
-  document.getElementById('play-btn').addEventListener('click', () => {
+  function _enterGameView() {
     menu.style.display = 'none';
     app.classList.add('on');
+    document.body.classList.add('in-game');
+  }
+  document.getElementById('play-btn').addEventListener('click', () => {
+    _enterGameView();
     window.startChowTime();
   });
 
@@ -263,8 +287,7 @@
         sessionStorage.setItem('pending-save', JSON.stringify(json));
         window.location.reload();
       } else {
-        menu.style.display = 'none';
-        app.classList.add('on');
+        _enterGameView();
         window.startChowTime({ saveJson: json });
       }
     };
@@ -277,8 +300,7 @@
     sessionStorage.removeItem('pending-save');
     try {
       const json = JSON.parse(pending);
-      menu.style.display = 'none';
-      app.classList.add('on');
+      _enterGameView();
       window.startChowTime({ saveJson: json });
     } catch (e) { /* fall through to normal start menu */ }
   }

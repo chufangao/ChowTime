@@ -184,9 +184,8 @@ class Simulation {
       for (let x = 0; x < this.grid.cols; x++) {
         const t = this.grid.getTile(x, y);
         if (!t) continue;
-        if (t.type === 'wall')       { t.type = 'floor'; t.wallKind = null; }
-        else if (t.type === 'gap')   { t.type = 'floor'; }
-        else if (t.type === 'spawn') { t.type = 'floor'; }
+        if (t.type === 'wall') { this.grid.setType(x, y, 'floor'); t.wallKind = null; }
+        else if (t.type === 'gap' || t.type === 'spawn') { this.grid.setType(x, y, 'floor'); }
       }
     }
     if (typeof applyLayout === 'function') applyLayout(this, layout);
@@ -427,6 +426,19 @@ class Simulation {
       .sort((a, b) => a.spawnTime - b.spawnTime);
   }
 
+  // Seekers queueing at a specific door, arrival-ordered. Customers without an
+  // entryDoor (e.g. tests that bypass spawnCustomer) match every door so the
+  // single-door legacy case still works. Used by both customer.update (to
+  // determine my place in line) and getQueueSlot (to resolve the slot index
+  // given just a Customer ref).
+  seekersAtDoor(door) {
+    if (!door) return [];
+    return this.customers
+      .filter(s => s.alive && (s.state === CS.SEEKING || s.state === CS.ENTERING))
+      .filter(s => !s.entryDoor || (s.entryDoor.x === door.x && s.entryDoor.y === door.y))
+      .sort((a, b) => a.spawnTime - b.spawnTime);
+  }
+
   // Slot 0 is at the door; later slots extend OUTWARD from the restaurant
   // along whichever perimeter edge the door sits on, so the queue forms
   // visibly outside. With multiple doors, each door gets its own queue.
@@ -436,11 +448,7 @@ class Simulation {
     if (typeof indexOrCustomer === 'object' && indexOrCustomer !== null) {
       const c = indexOrCustomer;
       if (c.entryDoor) door = c.entryDoor;
-      const seekers = this.customers
-        .filter(s => s.alive && (s.state === CS.SEEKING || s.state === CS.ENTERING))
-        .filter(s => !s.entryDoor || (s.entryDoor.x === door.x && s.entryDoor.y === door.y))
-        .sort((a, b) => a.spawnTime - b.spawnTime);
-      index = seekers.indexOf(c);
+      index = this.seekersAtDoor(door).indexOf(c);
       if (index < 0) index = 0;
     }
     const maxVisible = 4;

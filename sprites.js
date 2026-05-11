@@ -149,48 +149,10 @@ function drawIsoBox(g, sx, sy, height, topCol, rightCol, leftCol) {
 /* ---- Sprites: one function per drawable kind ------------------------------- */
 const Sprites = {
 
-  /* ---- Floor + door: static, drawn once into a dedicated layer ---- */
-  floorAndDoor(g, sim) {
-    // Header & footer strips
-    g.fillStyle(0x1a1428, 1);
-    g.fillRect(0, 0, GAME_W, TOP_BAR_H);
-    g.fillRect(0, GAME_H - BOT_H, GAME_W, BOT_H);
-    // Dark backdrop behind iso diamond region (below the top bar)
-    g.fillStyle(0x231a30, 1);
-    g.fillRect(0, TOP_BAR_H, GAME_W, GAME_H - TOP_BAR_H - BOT_H);
-
-    for (let y = 0; y < ROWS; y++) {
-      for (let x = 0; x < COLS; x++) {
-        const t = sim.grid.getTile(x, y);
-        const { sx, sy } = gridToScreen(x, y);
-        if (t.type === 'gap') {
-          // Recessed dark void — flat (no vertical extrusion) so it never
-          // occludes adjacent tiles. Rim of slightly lighter shadow inside.
-          drawDiamond(g, sx, sy, ISO_TW, ISO_TH, 0x0a0510, 0x000000, 1, 1, 1);
-          drawDiamond(g, sx, sy, ISO_TW - 6, ISO_TH - 3, 0x05030a, 0x000000, 0, 1, 1);
-          continue;
-        }
-        let col = ((x + y) & 1) ? COLORS.floorA : COLORS.floorB;
-        if (t.type === 'spawn') col = COLORS.spawn;
-        drawDiamond(g, sx, sy, ISO_TW, ISO_TH, col, 0x000000, 1, 1, 0.12);
-      }
-    }
-
-    // Door arch on every spawn tile.
-    for (const sp of (sim.spawnTiles || [sim.spawnTile])) {
-      if (!sp) continue;
-      const { sx, sy } = gridToScreen(sp.x, sp.y);
-      drawDiamond(g, sx, sy, ISO_TW, ISO_TH, 0x4d8a3a, 0x2d5a1a, 2);
-      g.fillStyle(0x2d5a1a, 1);
-      g.fillCircle(sx, sy - 2, 5);
-    }
-  },
-
-  /* ---- Wall: player partition only (light wood, low profile). ---- *
-   * Drawn from the y-sorted scene pass so it occludes correctly with
-   * customers/buildings. Default-layout obstacles are gaps now (flat, drawn
-   * in the floor pass) so this only handles player-placed partitions.
-   */
+  /* ---- Wall: player partition only (light wood, low profile). ----
+   * Used at runtime via WorldRenderer's fallback Graphics path (when the
+   * baked wall texture isn't available) and by TextureBaker to produce the
+   * 'wall_player' / 'wall_prebuilt' textures. */
   wall(view, x, y, kind, sx, sy) {
     const g = view.g;
     const H = 18;
@@ -1101,5 +1063,134 @@ const Sprites = {
       const tx = x + (w * i) / max;
       g.lineBetween(tx, y + 1, tx, y + h - 1);
     }
+  },
+
+  /* ============================================================================
+   * Building OVERLAY functions
+   * ============================================================================
+   * Each draws ONLY the conditional / animated parts of a building (cooking
+   * flame, plate, broken indicator, etc.). The static body is baked into a
+   * Phaser texture in PreloadScene (see src/view/texture_baker.js) and
+   * rendered as a Sprite. WorldRenderer pairs each Sprite with a per-building
+   * Graphics that this function draws into every frame.
+   *
+   * Signature mirrors the all-in-one draw functions: (view, b, sx, sy).
+   * ========================================================================== */
+
+  stoveOverlay(view, b, sx, sy) {
+    const { g, time } = view;
+    const H = 34;
+    const rfRight = sx + ISO_TW - 6, rfLeft = sx + 6;
+    if (b.cooking) {
+      // Glow behind oven window (mirrors the body draw's window geometry).
+      g.fillStyle(0xff8033, 0.45);
+      g.beginPath();
+      g.moveTo(rfLeft + 2, sy - H * 0.25 + 7);
+      g.lineTo(rfRight - 2, sy - H * 0.7 + 3);
+      g.lineTo(rfRight - 2, sy - 4);
+      g.lineTo(rfLeft + 2, sy + ISO_TH * 0.5 - 2);
+      g.closePath();
+      g.fillPath();
+      // Flame + smoke + progress arc above the burner.
+      const flick = 1 + Math.sin(time * 18 + b.id) * 0.18;
+      g.fillStyle(0xffa94d, 0.95);
+      g.fillEllipse(sx, sy - H - 2, 20 * flick, 6 * flick);
+      g.fillStyle(0xff6b35, 1);
+      g.fillEllipse(sx, sy - H - 4, 14 * flick, 4 * flick);
+      g.fillStyle(0xfff59d, 1);
+      g.fillEllipse(sx, sy - H - 6, 7 * flick, 2.5 * flick);
+      for (let i = 0; i < 3; i++) {
+        const off = ((time * 1.5) + i * 0.35) % 1;
+        const px = sx + Math.sin(time * 3 + i * 2) * 8;
+        const py = sy - H - 12 - off * 22;
+        g.fillStyle(0xffffff, 0.6 * (1 - off));
+        g.fillCircle(px, py, 4 + off * 2);
+      }
+      const p = 1 - b.cooking.timeLeft / b.cooking.total;
+      g.lineStyle(3.5, 0xffd84d, 1);
+      g.beginPath();
+      g.arc(sx, sy - H, 18, -Math.PI/2, -Math.PI/2 + p * Math.PI * 2, false);
+      g.strokePath();
+    } else if (b.reservedFor) {
+      g.fillStyle(0xaaaaaa, 1); g.fillCircle(sx, sy - H, 3);
+    }
+    if (b.broken) Sprites.drawBrokenOverlay(view, b, sx, sy);
+  },
+
+  catapult_stoveOverlay(view, b, sx, sy) {
+    // Reuse the stove's overlays for cooking/broken state.
+    Sprites.stoveOverlay(view, b, sx, sy);
+    // Twang animation on the launcher arm — only the dynamic offset; the
+    // arm itself is baked into the body texture at its resting angle.
+    const { g, time } = view;
+    const H = 34;
+    const lastFire = b._lastFireAt || -10;
+    const since = (time - lastFire);
+    if (since < 0.4) {
+      const twang = Math.sin(since * 18) * (1 - since / 0.4);
+      const angle = -0.7 + twang;
+      const px = sx, py = sy - H - 2;
+      const len = 18;
+      const ax = px + Math.cos(angle) * len;
+      const ay = py + Math.sin(angle) * len;
+      g.lineStyle(3, 0x8b6f3a, 1);
+      g.lineBetween(px, py, ax, ay);
+      g.fillStyle(0xffd84d, 1);
+      g.fillCircle(ax, ay, 3.5);
+      g.lineStyle(1.2, COLORS.outline, 1);
+      g.strokeCircle(ax, ay, 3.5);
+    }
+  },
+
+  tableOverlay(view, b, sx, sy) {
+    const { g, time } = view;
+    const H = 18;
+    if (b.plate) {
+      const pcol = b.plate.dirty ? 0xa89880 : 0xffffff;
+      g.fillStyle(pcol, 1); g.fillEllipse(sx, sy - H - 1, 18, 7);
+      g.lineStyle(2, COLORS.outline, 1); g.strokeEllipse(sx, sy - H - 1, 18, 7);
+      if (!b.plate.dirty) {
+        const fc = FOODS[b.plate.foodType].color;
+        g.fillStyle(fc, 1); g.fillEllipse(sx, sy - H - 2, 11, 4);
+        g.lineStyle(1.2, COLORS.outline, 0.6); g.strokeEllipse(sx, sy - H - 2, 11, 4);
+        for (let i = 0; i < 2; i++) {
+          const off = (time * 1.2 + i * 0.5) % 1;
+          g.fillStyle(0xffffff, 0.55 * (1 - off));
+          g.fillCircle(sx + (i === 0 ? -3 : 3), sy - H - 7 - off * 10, 2.5);
+        }
+      } else {
+        g.fillStyle(0x6a5540, 0.75);
+        g.fillCircle(sx - 3, sy - H - 1, 2);
+        g.fillCircle(sx + 2, sy - H + 1, 1.5);
+      }
+    }
+    if (b.broken) Sprites.drawBrokenOverlay(view, b, sx, sy);
+  },
+
+  chairOverlay(view, b, sx, sy) {
+    // Chairs have no animated body parts — only the broken indicator.
+    if (b.broken) Sprites.drawBrokenOverlay(view, b, sx, sy);
+  },
+
+  sinkOverlay(view, b, sx, sy) {
+    const { g, time } = view;
+    const H = 26;
+    if (b.washing) {
+      for (let i = 0; i < 5; i++) {
+        const off = ((time * 1.8) + i * 0.25) % 1;
+        const px = sx + Math.sin(time * 4 + i * 1.3) * 10;
+        const py = sy - H - off * 18;
+        g.fillStyle(0xffffff, 0.75 * (1 - off));
+        g.fillCircle(px, py, 2 + off * 1.5);
+      }
+      const p = 1 - b.washing.timeLeft / b.washing.total;
+      g.lineStyle(3, 0x7fb8d9, 1);
+      g.beginPath();
+      g.arc(sx, sy - H, 14, -Math.PI/2, -Math.PI/2 + p * Math.PI * 2, false);
+      g.strokePath();
+    } else if (b.reservedFor) {
+      g.fillStyle(0xaaaaaa, 1); g.fillCircle(sx, sy - H, 3);
+    }
+    if (b.broken) Sprites.drawBrokenOverlay(view, b, sx, sy);
   },
 };

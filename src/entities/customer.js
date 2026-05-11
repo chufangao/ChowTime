@@ -105,11 +105,7 @@ class Customer extends Entity {
         // seat in parallel.
         const slot = sim.getQueueSlot(this);
         const myDoor = this.entryDoor || sim.spawnTiles[0];
-        const seekersHere = sim.customers
-          .filter(s => s.alive && (s.state === CS.SEEKING || s.state === CS.ENTERING))
-          .filter(s => !s.entryDoor || (s.entryDoor.x === myDoor.x && s.entryDoor.y === myDoor.y))
-          .sort((a, b) => a.spawnTime - b.spawnTime);
-        const myIdx = seekersHere.indexOf(this);
+        const myIdx = sim.seekersAtDoor(myDoor).indexOf(this);
 
         // Re-target whenever my slot shifts (someone ahead got seated).
         const slotChanged = !this.queueSlot ||
@@ -150,8 +146,7 @@ class Customer extends Entity {
             this.table.plate.foodType === this.foodPref) {
           this.state = CS.EATING;
           // Broken tables eat twice as slow (wobbly cutlery, sticky surface…).
-          const brokenMult = this.table.broken ? 2 : 1;
-          this.eatTimer = CONFIG.eatDuration * abilityMult(this, 'eatTimeMult', this.foodPref) * brokenMult;
+          this.eatTimer = CONFIG.eatDuration * abilityMult(this, 'eatTimeMult', this.foodPref) * this.table.workMult;
           fireAbilityHook(this, 'onEat', { sim, foodKey: this.foodPref });
         }
         break;
@@ -196,7 +191,11 @@ class Customer extends Entity {
     this.ordersRemaining--;
     if (this.ordersRemaining > 0) {
       // Re-enter WAITING with a fresh order. Randomize foodPref so the second
-      // course isn't a guaranteed duplicate.
+      // course isn't a guaranteed duplicate. Reset anger — a successful course
+      // is a satisfying moment, and without this multi-course customers carry
+      // their course-1 anger straight into course 2 and rage-quit before the
+      // chef can even finish cooking.
+      this.anger = 0;
       this.state = CS.WAITING;
       this.foodPref = FOOD_KEYS[(Math.random() * FOOD_KEYS.length) | 0];
       this.order = new Order(this, this.foodPref);

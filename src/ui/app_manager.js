@@ -164,10 +164,13 @@ class AppManager {
   }
 
   /** Returns true if (px,py) is inside the top bar or the active app's panel.
-   *  GameScene calls this once per pointer event before doing grid logic. */
+   *  GameScene calls this once per pointer event before doing grid logic.
+   *  Prefers p.worldX/worldY: topBarRect and panelRect are in logical world
+   *  coords, and with the pixel-perfect canvas the main camera applies a
+   *  zoom — p.x/y are screen-space, only worldX/Y are pre-inverted. */
   consumesPointer(p) {
-    const px = p && (p.x != null ? p.x : p[0]);
-    const py = p && (p.y != null ? p.y : p[1]);
+    const px = p && (p.worldX != null ? p.worldX : (p.x != null ? p.x : p[0]));
+    const py = p && (p.worldY != null ? p.worldY : (p.y != null ? p.y : p[1]));
     if (this.topBarRect) {
       const r = this.topBarRect;
       if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) return true;

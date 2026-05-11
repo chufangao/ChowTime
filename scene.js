@@ -1,36 +1,35 @@
 /* ============================================================================
  * scene.js — Phaser scene + AppManager wiring
  * ============================================================================
- * The old Sidebar / RecruitModal / DayEndModal / GameOverModal classes were
- * replaced by the modular App/AppManager system under src/ui/. This file is
- * now a thin orchestrator:
+ * GameScene is a thin orchestrator. World rendering now lives in
+ * src/view/floor_renderer.js (per-tile floor Sprites) and
+ * src/view/world_renderer.js (per-entity Sprites/Graphics on a y-sorted
+ * Layer); this file is responsible for:
  *
- *   - GameScene boots the simulation
- *   - Builds an AppManager, registers default build items, apps, widgets
- *   - Wires the TopBar
- *   - Forwards pointer events through manager.consumesPointer()
- *   - Routes left-clicks on the grid through manager.forwardMapClick()
- *     when a map-tool app (Move / Sell) is active, OR through the active
- *     BuildApp's onMapClick when a placement is in progress
+ *   - Booting the simulation (fresh or from a save)
+ *   - Calling FloorRenderer/WorldRenderer.update each frame
+ *   - Building an AppManager, registering build items / apps / widgets
+ *   - Wiring the TopBar and forwarding pointer events through it
+ *   - Ghost preview rendering (build / move placement) into gGhost
+ *   - Save/load file I/O
  *
  * Adding a new app: add the file under src/ui/apps/, register it in
  * _registerUI(), done. No code in this file knows the app's specifics.
  * ========================================================================== */
 
-// Cheap hash of every floor/gap/door tile + spawnTiles array. Changes when a
-// reroll, save-load, or Floor/Sell action mutates the static floor layer.
-// Walls are NOT included — those render in the per-frame y-sort pass.
-function _floorSignature(sim) {
-  let h = 0;
-  for (let y = 0; y < sim.grid.rows; y++) {
-    for (let x = 0; x < sim.grid.cols; x++) {
-      const t = sim.grid.tiles[y][x];
-      const code = t.type === 'gap' ? 2 : (t.type === 'spawn' ? 3 : 1);
-      h = (h * 31 + code) | 0;
-    }
-  }
-  return h;
+// Static backdrop behind the iso grid: header strip, footer strip, and the
+// dark fill behind the diamond region. Drawn once into gFloor on create() —
+// none of these pixels ever change at runtime, so a per-frame redraw or a
+// signature compare would be pure waste. The per-tile floor diamonds + door
+// overlays live on FloorRenderer's Layer instead.
+function _drawFloorBackdrop(g) {
+  g.fillStyle(0x1a1428, 1);
+  g.fillRect(0, 0, GAME_W, TOP_BAR_H);
+  g.fillRect(0, GAME_H - BOT_H, GAME_W, BOT_H);
+  g.fillStyle(0x231a30, 1);
+  g.fillRect(0, TOP_BAR_H, GAME_W, GAME_H - TOP_BAR_H - BOT_H);
 }
+
 
 class GameScene extends Phaser.Scene {
   constructor() {
@@ -53,22 +52,37 @@ class GameScene extends Phaser.Scene {
     // _uiSpeed is the player-facing speed multiplier; default 1×.
     if (this.sim._uiSpeed == null) this.sim._uiSpeed = 1;
 
-    // --- Graphics layers, bottom to top ---
-    this.gFloor   = this.add.graphics();
-    this.gObjects = this.add.graphics();
-    this.gGhost   = this.add.graphics();   // translucent move-tool preview
-    this.gOverlay = this.add.graphics();
-    // Ghost layer is drawn on top of objects but below overlay UI. Translucent
-    // so the player sees what they're holding (and how a chair will orient).
-    if (this.gGhost.setAlpha) this.gGhost.setAlpha(0.45);
+    // --- Graphics layers, bottom to top, with explicit depths so the
+    // WorldRenderer's display Layer (depth 100) sits between the static
+    // floor and the per-frame transient overlays. ---
+    this.gFloor   = this.add.graphics();   // depth 0  : floor + door tiles
+    this.gObjects = this.add.graphics();   // depth 200: projectiles, pickup marker
+    this.gGhost   = this.add.graphics();   // depth 250: translucent move-tool preview
+    this.gOverlay = this.add.graphics();   // depth 300: hover diamond, build frame
+    if (this.gFloor.setDepth)   this.gFloor.setDepth(0);
+    if (this.gObjects.setDepth) this.gObjects.setDepth(200);
+    if (this.gGhost.setDepth)   this.gGhost.setDepth(250);
+    if (this.gOverlay.setDepth) this.gOverlay.setDepth(300);
+    if (this.gGhost.setAlpha)   this.gGhost.setAlpha(0.45);
 
-    Sprites.floorAndDoor(this.gFloor, this.sim);
-    // Track which layout the floor layer was painted for. The floor pass is
-    // static (drawn once into gFloor), but reroll/load/placeFloor mutate the
-    // floor/gap/door tiles — so we redraw whenever the layout id or any
-    // floor-relevant tile differs from last paint.
+    // Static backdrop: header/footer strips + dark rect behind the iso grid.
+    // The per-tile floor diamonds now come from FloorRenderer (Sprites on a
+    // Layer), so gFloor only handles the fixed background that never changes
+    // between frames or between layouts.
+    _drawFloorBackdrop(this.gFloor);
+
+    // World renderer owns one GameObject per building/wall/entity on a
+    // y-sorted Layer (depth 100). Replaces the old per-frame manual y-sort
+    // loop. Attach now so create()'s order matches GameScene shutdown.
+    if (typeof WorldRenderer !== 'undefined') WorldRenderer.attach(this);
+
+    // Floor renderer: one Sprite per tile on a Layer (depth 10), above the
+    // backdrop, below the world. Replaces the old full-redraw-on-change
+    // floor pass. Track the floor signature so we only reconcile tiles when
+    // a Reroll / Floor build / Sell / save-load actually mutates the layout.
+    if (typeof FloorRenderer !== 'undefined') FloorRenderer.attach(this, this.sim);
     this._floorPaintedFor = this.sim.layoutId;
-    this._floorPaintedSig = _floorSignature(this.sim);
+    this._floorPaintedVer = this.sim.grid.floorVersion;
 
     this._texts = new Map();
     this._frame = 0;
@@ -98,10 +112,9 @@ class GameScene extends Phaser.Scene {
     }
 
     this.topBar = new TopBar(this, this.appManager, GAME_W, GAME_H);
-    // Floor needs the top-bar strip painted on top of it so the floor
-    // backdrop doesn't bleed through. The bar's own bg already does that —
-    // but we must redraw the bar AFTER the floor each frame. TopBar uses
-    // depth 950 which is already above gFloor (depth 0).
+    // TopBar uses depth 950+ which sits above every world layer below
+    // (gFloor 0, FloorRenderer 10, WorldRenderer 100, gObjects 200,
+    // gGhost 250, gOverlay 300, pooled text 310).
 
     // --- Hover state for placement / map-tool preview ---
     this.hover = null;
@@ -116,6 +129,40 @@ class GameScene extends Phaser.Scene {
     this.input.on('pointerdown', p => this._onPointerDown(p));
     this.input.on('wheel', (p, _go, _dx, dy) => this.appManager.forwardWheel(p, dy));
     this.input.keyboard.on('keydown', e => this._onKey(e));
+
+    // Pixel-perfect canvas: the backing-store is sized at viewport CSS × DPR
+    // (clamped to MAX_BACKING) in startChowTime. Here we scale the world to
+    // fill it. With cam zoom = camZoom and centerOn(GAME_W/2, GAME_H/2),
+    // world (0,0) → canvas (0,0) and world (GAME_W, GAME_H) → canvas
+    // (backW, backH) — pointer worldX/Y stays in logical coords for the rest
+    // of the game.
+    const size = (typeof window !== 'undefined' && window.__chowTimeSize) || null;
+    const camZoom = (size && size.camZoom) || 1;
+    this.cameras.main.setZoom(camZoom);
+    this.cameras.main.centerOn(GAME_W / 2, GAME_H / 2);
+
+    // Text resolution: glyph atlas is rasterised at fontSize × resolution.
+    // The atlas then renders at fontSize in world coords, which the camera
+    // magnifies by camZoom on its way to the canvas. So to land 1 atlas
+    // pixel on 1 canvas pixel we need resolution ≥ camZoom. (Sprites avoid
+    // this via TextureBaker's 2× bake; text does not, which is why the
+    // figures looked sharp while glyphs were still blurry.) Cap at 4 for
+    // texture memory.
+    this._textResolution = Math.max(1, Math.min(4, Math.ceil(camZoom)));
+
+    // Launch the parallel HUD scene. It's empty today (see src/scenes/ui_scene.js)
+    // but starting it now means future phases can move TopBar/widgets there
+    // without touching the Phaser.Game config.
+    if (!this.scene.isActive('ui')) this.scene.launch('ui');
+
+    // Expose camera handles on window for ad-hoc zoom/pan. The viewport is
+    // currently a fixed GAME_W × GAME_H but Phaser's camera already supports
+    // setZoom/scrollX/Y — wiring it now means future "big map" features
+    // (Phase 7 in the migration plan) cost no additional scene plumbing.
+    if (typeof window !== 'undefined') {
+      window.gameZoom = (z) => { this.cameras.main.setZoom(z); };
+      window.gamePan  = (x, y) => { this.cameras.main.setScroll(x | 0, y | 0); };
+    }
   }
 
   _registerUI() {
@@ -168,14 +215,15 @@ class GameScene extends Phaser.Scene {
 
     this._view.time = this.sim.time;
 
-    // Repaint the static floor layer if the layout changed (reroll / load) or
-    // any floor/gap/door tile mutated (Floor build, Sell tool, etc.).
-    const sig = _floorSignature(this.sim);
-    if (this._floorPaintedFor !== this.sim.layoutId || this._floorPaintedSig !== sig) {
-      this.gFloor.clear();
-      Sprites.floorAndDoor(this.gFloor, this.sim);
+    // Floor tile sprites: reconcile only when the layout changed (reroll /
+    // load) or a Floor/Sell mutated a tile type. Grid.setType bumps
+    // floorVersion on any type change, so comparing the counter is O(1).
+    const ver = this.sim.grid.floorVersion;
+    if (this._floorPaintedFor !== this.sim.layoutId || this._floorPaintedVer !== ver) {
+      const layoutChanged = this._floorPaintedFor !== this.sim.layoutId;
+      if (typeof FloorRenderer !== 'undefined') FloorRenderer.update(this.sim, layoutChanged);
       this._floorPaintedFor = this.sim.layoutId;
-      this._floorPaintedSig = sig;
+      this._floorPaintedVer = ver;
     }
 
     this._drawScene();
@@ -184,10 +232,15 @@ class GameScene extends Phaser.Scene {
     this._cullTexts();
   }
 
-  /* ---- Input routing ---- */
+  /* ---- Input routing ----
+   * Pointer coords: with the pixel-perfect canvas, the world is rendered via
+   * camera zoom, so p.x/p.y are screen-space (canvas pixels). All hit-tests
+   * here (screenToTile, panel rects, top bar rect) are in logical world
+   * coords, so we route everything through p.worldX/p.worldY which Phaser
+   * pre-inverts through the camera matrix. */
   _onPointerMove(p) {
     if (this.appManager.consumesPointer(p)) { this.hover = null; return; }
-    const tile = screenToTile(p.x, p.y);
+    const tile = screenToTile(p.worldX, p.worldY);
     if (!tile) { this.hover = null; return; }
     this.hover = { x: tile.x, y: tile.y, valid: this._previewValidAt(tile.x, tile.y) };
   }
@@ -201,7 +254,7 @@ class GameScene extends Phaser.Scene {
       const app = this.appManager.get(this.appManager.activeAppId);
       if (app && app.hasPanel && !app.isModal) { this.appManager.close(); return; }
     }
-    const tile = screenToTile(p.x, p.y); if (!tile) return;
+    const tile = screenToTile(p.worldX, p.worldY); if (!tile) return;
 
     const editingAllowed = !this.sim.isDayActive() || this.sim.debug;
 
@@ -264,57 +317,22 @@ class GameScene extends Phaser.Scene {
     if (input) input.click();
   }
 
-  /* ---- Main draw pass: y-sort everything, delegate to SPRITES ---- */
+  /* ---- Main draw pass: world via WorldRenderer + transient overlays ---- */
   _drawScene() {
     this.gObjects.clear();
     this.gOverlay.clear();
     const view = this._view;
 
-    const items = [];
-    for (const b of this.sim.buildings) {
-      const { sx, sy } = gridToScreen(b.x, b.y);
-      items.push({ sortY: sy - 0.1, kind: 'b', ref: b, sx, sy });
-    }
-    // Walls participate in the y-sort so they occlude entities behind them
-    // and get hidden by entities in front. They live as tile state, not
-    // building instances, so we scan the grid each frame.
-    for (let gy = 0; gy < this.sim.grid.rows; gy++) {
-      for (let gx = 0; gx < this.sim.grid.cols; gx++) {
-        const t = this.sim.grid.tiles[gy][gx];
-        if (!t || t.type !== 'wall') continue;
-        const { sx, sy } = gridToScreen(gx, gy);
-        items.push({ sortY: sy - 0.05, kind: 'w', wallKind: t.wallKind || 'player', sx, sy });
-      }
-    }
+    // World objects (buildings, walls, customers, employees) live on a
+    // y-sorted Layer managed by WorldRenderer. Each frame it reconciles
+    // sim state against per-entity GameObjects and re-sorts by .y.
+    if (typeof WorldRenderer !== 'undefined') WorldRenderer.update(this.sim, view);
+
+    // Tip floaters above leaving customers — pure pooled-text, doesn't go
+    // through the y-sort. Drawn after the world so it always reads on top.
     for (const c of this.sim.customers) {
       const { sx, sy } = gridToScreen(c.x, c.y);
-      items.push({ sortY: sy, kind: 'c', ref: c, sx, sy });
-    }
-    for (const e of this.sim.employees) {
-      const { sx, sy } = gridToScreen(e.x, e.y);
-      items.push({ sortY: sy, kind: 'e', ref: e, sx, sy });
-    }
-    items.sort((a, b) => a.sortY - b.sortY);
-
-    for (const it of items) {
-      if (it.kind === 'b') {
-        const b = it.ref;
-        const age = this.sim.time - b.placedAt;
-        const bounce = age < 0.25 ? -Math.sin((age / 0.25) * Math.PI) * 4 : 0;
-        const sy = it.sy + bounce;
-        if      (b.type === 'stove')          Sprites.stove(view, b, it.sx, sy);
-        else if (b.type === 'catapult_stove') Sprites.catapult_stove(view, b, it.sx, sy);
-        else if (b.type === 'table')          Sprites.table(view, b, it.sx, sy);
-        else if (b.type === 'chair')          Sprites.chair(view, b, it.sx, sy);
-        else if (b.type === 'sink')           Sprites.sink(view, b, it.sx, sy);
-      } else if (it.kind === 'w') {
-        Sprites.wall(view, null, null, it.wallKind, it.sx, it.sy);
-      } else if (it.kind === 'c') {
-        Sprites.customer(view, it.ref, it.sx, it.sy);
-        Sprites.tipFloater(view, it.ref, it.sx, it.sy);
-      } else {
-        Sprites.employee(view, it.ref, it.sx, it.sy);
-      }
+      Sprites.tipFloater(view, c, sx, sy);
     }
 
     Sprites.projectiles(view, this.sim);
@@ -460,6 +478,13 @@ class GameScene extends Phaser.Scene {
     if (!t) {
       t = this.add.text(x, y, str, style);
       t.setOrigin(0.5, 0.5);
+      // Texts (door labels, popups, tip floaters, broken ⚠) render above the
+      // world Layer (depth 100) and the transient overlays (200-300).
+      if (t.setDepth) t.setDepth(310);
+      // Match the camera zoom so glyphs rasterise at canvas-pixel resolution
+      // rather than logical size (which the camera then upscales = blur).
+      const res = this._textResolution;
+      if (res && res > 1 && t.setResolution) t.setResolution(res);
       this._texts.set(key, t);
     }
     t.setText(str);
@@ -486,20 +511,98 @@ class GameScene extends Phaser.Scene {
  * decide when to launch the game. Accepts optional { saveJson } to load
  * a serialized run.
  * ============================================================================ */
+// Pixel-perfect canvas sizing: the game runs in a fixed GAME_W × GAME_H
+// logical-coord space, but we render into a backing-store that matches the
+// display's physical pixels (CSS px × devicePixelRatio). The camera zoom
+// scales the logical world up to fill the larger canvas. Without this, the
+// canvas (sized at GAME_W = 1080) is CSS-stretched by FIT mode and again by
+// DPR, blurring everything by ~3.5×.
+//
+// MAX_BACKING caps the canvas backing-store so we don't exceed WebGL texture
+// limits on big displays (typical limit 8192–16384; 4096 is conservative).
+const MAX_BACKING = 4096;
+function _computeCanvasSize() {
+  const dpr = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
+  const parent = (typeof document !== 'undefined') && document.getElementById('game-container');
+  // Fall back to window dims pre-#app reveal (CSS keeps #app display:none
+  // until Play is clicked; the parent has 0 size then). After reveal, prefer
+  // the actual container so we letterbox into available area.
+  const pw = (parent && parent.clientWidth)  || (typeof window !== 'undefined' ? window.innerWidth  : GAME_W);
+  const ph = (parent && parent.clientHeight) || (typeof window !== 'undefined' ? window.innerHeight : GAME_H);
+  const fitS = Math.min(pw / GAME_W, ph / GAME_H);
+  const cssW = Math.max(1, Math.round(GAME_W * fitS));
+  const cssH = Math.max(1, Math.round(GAME_H * fitS));
+  // Clamp backing-store to MAX_BACKING on whichever axis is longer.
+  const backScale = Math.min(dpr, MAX_BACKING / Math.max(cssW, cssH));
+  const backW = Math.max(1, Math.round(cssW * backScale));
+  const backH = Math.max(1, Math.round(cssH * backScale));
+  const camZoom = backW / GAME_W; // == backH / GAME_H (within rounding)
+  return { dpr, cssW, cssH, backW, backH, camZoom };
+}
+
 window.startChowTime = function (opts) {
   if (window.__chowTimeInstance) return window.__chowTimeInstance;
   // Stash opts on window — GameScene.create reads them. This avoids the
   // gotcha of trying to pass per-instance data through the Phaser.Scene ctor.
   window.__chowTimeInitOpts = opts || {};
-  window.__chowTimeInstance = new Phaser.Game({
+  const size = _computeCanvasSize();
+  window.__chowTimeSize = size;
+  const game = new Phaser.Game({
     type: Phaser.AUTO,
-    width: GAME_W,
-    height: GAME_H,
+    width: size.backW,
+    height: size.backH,
     backgroundColor: '#1a1428',
     parent: 'game',
-    scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH },
-    scene: GameScene,
-    render: { pixelArt: false, antialias: true },
+    // NONE mode: we manage canvas CSS size and backing-store directly.
+    // FIT mode CSS-stretches the canvas and blurs text — see the
+    // _computeCanvasSize comment above.
+    scale: { mode: Phaser.Scale.NONE, autoCenter: Phaser.Scale.NO_CENTER },
+    // Scene order: Boot → Preload → Game (auto-started by Preload). UIScene
+    // is registered but not auto-started; GameScene.create() launches it in
+    // parallel so it overlays the world. Only BootScene has autoStart=true
+    // via being first in this array.
+    scene: [BootScene, PreloadScene, GameScene, UIScene],
+    render: { pixelArt: false, antialias: true, roundPixels: false },
   });
-  return window.__chowTimeInstance;
+  window.__chowTimeInstance = game;
+  // Set CSS size after Phaser's own style setup so we win the cascade. The
+  // canvas backing-store stays at backW × backH (physical pixels); CSS sizes
+  // it down to cssW × cssH so the browser maps 1 backing pixel → 1 physical
+  // pixel on the display.
+  const _applyCanvasCss = () => {
+    if (game.canvas) {
+      game.canvas.style.width  = size.cssW + 'px';
+      game.canvas.style.height = size.cssH + 'px';
+    }
+  };
+  if (game.canvas) _applyCanvasCss();
+  else game.events.once('ready', _applyCanvasCss);
+
+  // Debounced resize: recompute sizing math from the container and re-apply
+  // to canvas + all active cameras. The single biggest regression risk —
+  // wire it once, here, so every scene shares the same path.
+  let resizeTimer = null;
+  const _onResize = () => {
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      resizeTimer = null;
+      const next = _computeCanvasSize();
+      window.__chowTimeSize = next;
+      if (game.scale && game.scale.resize) game.scale.resize(next.backW, next.backH);
+      if (game.canvas) {
+        game.canvas.style.width  = next.cssW + 'px';
+        game.canvas.style.height = next.cssH + 'px';
+      }
+      // Re-apply zoom + center on every active scene's main camera.
+      const scenes = (game.scene && game.scene.scenes) || [];
+      for (const s of scenes) {
+        if (!s || !s.cameras || !s.cameras.main) continue;
+        if (s.sys && s.sys.settings && s.sys.settings.active === false) continue;
+        s.cameras.main.setZoom(next.camZoom);
+        s.cameras.main.centerOn(GAME_W / 2, GAME_H / 2);
+      }
+    }, 150);
+  };
+  if (typeof window !== 'undefined') window.addEventListener('resize', _onResize);
+  return game;
 };
