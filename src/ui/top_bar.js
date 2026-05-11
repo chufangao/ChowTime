@@ -260,9 +260,16 @@ class TopBar {
         z.setInteractive({ useHandCursor: true });
       }
     }
-    // Rebind: clear previous listener, attach the new one.
+    // Rebind: clear previous listener, attach the new one. Wrap so the
+    // AppManager knows this pointerdown was consumed by a UI Zone — keeps
+    // the scene-level pointerdown from falling through to grid logic. See
+    // AppManager._zoneClickInFlight for the full rationale.
     if (z.removeAllListeners) z.removeAllListeners('pointerdown');
-    if (z.on) z.on('pointerdown', onClick);
+    const mgr = this.manager;
+    const wrapped = mgr
+      ? (pointer, localX, localY, evt) => { mgr._zoneClickInFlight = true; onClick(pointer, localX, localY, evt); }
+      : onClick;
+    if (z.on) z.on('pointerdown', wrapped);
     return z;
   }
 

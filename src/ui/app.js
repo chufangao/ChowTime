@@ -350,7 +350,15 @@ class App {
       }
     }
     if (z.removeAllListeners) z.removeAllListeners('pointerdown');
-    if (z.on) z.on('pointerdown', onClick);
+    // Wrap onClick so AppManager knows a Zone consumed this pointer event.
+    // Without this, a handler that closes the panel (Build's item-select →
+    // close panel + arm cursor) lets the scene-level pointerdown fall
+    // through to grid logic and place on the tile behind the menu.
+    const mgr = this.manager;
+    const wrapped = mgr
+      ? (pointer, localX, localY, evt) => { mgr._zoneClickInFlight = true; onClick(pointer, localX, localY, evt); }
+      : onClick;
+    if (z.on) z.on('pointerdown', wrapped);
     return z;
   }
 

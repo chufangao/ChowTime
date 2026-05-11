@@ -246,7 +246,14 @@ class GameScene extends Phaser.Scene {
   }
 
   _onPointerDown(p) {
-    if (this.appManager.consumesPointer(p)) return;
+    if (this.appManager.consumesPointer(p)) {
+      // Zone consumed this event — clear the flag so the NEXT pointerdown
+      // starts fresh. (consumesPointer also returns true based on rect
+      // hit-tests, so this clear is harmless when no Zone fired.)
+      this.appManager._zoneClickInFlight = false;
+      return;
+    }
+    this.appManager._zoneClickInFlight = false;
     // Click landed outside the active app's panel: standard mobile pattern
     // is to dismiss the (non-modal) panel and let the click also act on the
     // surface beneath. We close + return so the same click doesn't double up.

@@ -32,6 +32,15 @@ class AppManager {
     // Each: { x, y, w, h }. Falsy means no top-bar gate.
     this.topBarRect  = null;
     this.scene       = null;
+    // Set by zone wrappers (see App._bindZone / TopBar._bindZone) the
+    // instant a UI Zone receives pointerdown. Phaser delivers game-object
+    // pointerdown BEFORE scene-level pointerdown, so a Zone handler that
+    // closes the active panel (e.g. Build's item select → close panel +
+    // arm placement cursor) would otherwise cause the scene's pointerdown
+    // to see no active panel and fall through to grid placement on the
+    // tile behind the menu. consumesPointer() returns true while this flag
+    // is set; the scene's pointerdown clears it once consumed.
+    this._zoneClickInFlight = false;
   }
 
   attachScene(scene) {
@@ -169,6 +178,10 @@ class AppManager {
    *  coords, and with the pixel-perfect canvas the main camera applies a
    *  zoom — p.x/y are screen-space, only worldX/Y are pre-inverted. */
   consumesPointer(p) {
+    // A Zone handler ran on this same pointerdown — its onClick may have
+    // already closed the panel, so the rect tests below would miss. Trust
+    // the flag and short-circuit.
+    if (this._zoneClickInFlight) return true;
     const px = p && (p.worldX != null ? p.worldX : (p.x != null ? p.x : p[0]));
     const py = p && (p.worldY != null ? p.worldY : (p.y != null ? p.y : p[1]));
     if (this.topBarRect) {
