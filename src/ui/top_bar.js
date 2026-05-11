@@ -225,8 +225,11 @@ class TopBar {
     if (opts.sub) {
       const subKey = `btn:${opts.key}:sub`;
       used.add(subKey);
+      // Sub-label always white — the active-state textColor (dark on orange)
+      // is for the icon's contrast on the highlighted background; the small
+      // title underneath stays light so it remains legible at 9px.
       const s = this._addText(subKey, opts.sub, x + w / 2, y + 24, {
-        font: '9px system-ui', color: opts.textColor || '#c0b0e0',
+        font: '9px system-ui', color: '#ffffff',
       });
       if (s && s.setOrigin) s.setOrigin(0.5, 0);
     }
