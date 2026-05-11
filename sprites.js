@@ -32,26 +32,31 @@ const ISO_TW = 36;
 const ISO_TH = 18;
 
 /* ---- Layout chrome around the iso grid ------------------------------------- */
-const UI_W        = 280;
-const TOP_H       = 52;
-const BOT_H       = 32;
+// TOP_BAR_H: persistent phone-app-style top bar across the full canvas width.
+const TOP_BAR_H   = 60;
+const BOT_H       = 16;
 const LEFT_MARGIN = 24;
 const RIGHT_MARGIN= 30;
-const TOP_MARGIN  = 22;
+const TOP_MARGIN  = 12;
 const BOT_MARGIN  = 22;
 
 /* ---- Derived canvas geometry (needs COLS, ROWS from game.js) --------------- */
-// Grid origin: screen pixel where tile (0,0)'s CENTER sits.
-// Leftmost point is tile (0, ROWS-1)'s west corner at LEFT_MARGIN.
-const GRID_OX = LEFT_MARGIN + ROWS * ISO_TW;              // 312
-const GRID_OY = TOP_H + TOP_MARGIN + ISO_TH;              // 92
+// Grid is shifted down by TOP_BAR_H so it doesn't overlap the bar.
+//
+// GAME_W: needs to be >= the top-bar's natural width (status widgets +
+// panel-app launchers + map tools + speed). The grid alone is ~774px, but
+// the top bar needs ~1080px to render every button without overlap. Whichever
+// is larger wins; the iso grid is then centered horizontally inside.
+const GRID_W_NATURAL = LEFT_MARGIN + ROWS * ISO_TW + COLS * ISO_TW + RIGHT_MARGIN;
+const TOP_BAR_W_MIN  = 1080;
+const GAME_W = Math.max(GRID_W_NATURAL, TOP_BAR_W_MIN);
+// Recenter the grid horizontally if the canvas is wider than the natural grid.
+const _GRID_PAD_X = Math.floor((GAME_W - GRID_W_NATURAL) / 2);
+const GRID_OX = LEFT_MARGIN + ROWS * ISO_TW + _GRID_PAD_X;
+const GRID_OY = TOP_BAR_H + TOP_MARGIN + ISO_TH;
 
-const GAME_W = GRID_OX + COLS * ISO_TW + RIGHT_MARGIN + UI_W;
-// Canvas height is max(grid height, min needed by sidebar). The sidebar
-// grew beyond the iso-grid height once we added the Move tool and Lives
-// readout, so we extend the canvas downward to keep all controls visible.
-const GAME_H_GRID = TOP_H + TOP_MARGIN + (COLS + ROWS) * ISO_TH + BOT_MARGIN + BOT_H;
-const GAME_H_MIN  = 580;    // chosen to fit every sidebar section
+const GAME_H_GRID = TOP_BAR_H + TOP_MARGIN + (COLS + ROWS) * ISO_TH + BOT_MARGIN + BOT_H;
+const GAME_H_MIN  = 520;
 const GAME_H = Math.max(GAME_H_GRID, GAME_H_MIN);
 
 /* ---- Color palettes -------------------------------------------------------- */
@@ -148,28 +153,57 @@ const Sprites = {
   floorAndDoor(g, sim) {
     // Header & footer strips
     g.fillStyle(0x1a1428, 1);
-    g.fillRect(0, 0, GAME_W - UI_W, TOP_H);
-    g.fillRect(0, GAME_H - BOT_H, GAME_W - UI_W, BOT_H);
-    // Dark backdrop behind iso diamond region
+    g.fillRect(0, 0, GAME_W, TOP_BAR_H);
+    g.fillRect(0, GAME_H - BOT_H, GAME_W, BOT_H);
+    // Dark backdrop behind iso diamond region (below the top bar)
     g.fillStyle(0x231a30, 1);
-    g.fillRect(0, TOP_H, GAME_W - UI_W, GAME_H - TOP_H - BOT_H);
+    g.fillRect(0, TOP_BAR_H, GAME_W, GAME_H - TOP_BAR_H - BOT_H);
 
     for (let y = 0; y < ROWS; y++) {
       for (let x = 0; x < COLS; x++) {
         const t = sim.grid.getTile(x, y);
         const { sx, sy } = gridToScreen(x, y);
+        if (t.type === 'gap') {
+          // Recessed dark void — flat (no vertical extrusion) so it never
+          // occludes adjacent tiles. Rim of slightly lighter shadow inside.
+          drawDiamond(g, sx, sy, ISO_TW, ISO_TH, 0x0a0510, 0x000000, 1, 1, 1);
+          drawDiamond(g, sx, sy, ISO_TW - 6, ISO_TH - 3, 0x05030a, 0x000000, 0, 1, 1);
+          continue;
+        }
         let col = ((x + y) & 1) ? COLORS.floorA : COLORS.floorB;
         if (t.type === 'spawn') col = COLORS.spawn;
         drawDiamond(g, sx, sy, ISO_TW, ISO_TH, col, 0x000000, 1, 1, 0.12);
       }
     }
 
-    // Door arch on spawn tile
-    const sp = sim.spawnTile;
-    const { sx, sy } = gridToScreen(sp.x, sp.y);
-    drawDiamond(g, sx, sy, ISO_TW, ISO_TH, 0x4d8a3a, 0x2d5a1a, 2);
-    g.fillStyle(0x2d5a1a, 1);
-    g.fillCircle(sx, sy - 2, 5);
+    // Door arch on every spawn tile.
+    for (const sp of (sim.spawnTiles || [sim.spawnTile])) {
+      if (!sp) continue;
+      const { sx, sy } = gridToScreen(sp.x, sp.y);
+      drawDiamond(g, sx, sy, ISO_TW, ISO_TH, 0x4d8a3a, 0x2d5a1a, 2);
+      g.fillStyle(0x2d5a1a, 1);
+      g.fillCircle(sx, sy - 2, 5);
+    }
+  },
+
+  /* ---- Wall: player partition only (light wood, low profile). ---- *
+   * Drawn from the y-sorted scene pass so it occludes correctly with
+   * customers/buildings. Default-layout obstacles are gaps now (flat, drawn
+   * in the floor pass) so this only handles player-placed partitions.
+   */
+  wall(view, x, y, kind, sx, sy) {
+    const g = view.g;
+    const H = 18;
+    drawIsoBox(g, sx, sy, H, 0xd4a06a, 0xa07a4d, 0x8a6638);
+    // Subtle horizontal slats on the right face for a paneled look.
+    g.lineStyle(1, 0x6b4a28, 0.5);
+    for (let i = 1; i <= 2; i++) {
+      const yy = sy - (H * i / 3);
+      g.beginPath();
+      g.moveTo(sx, yy + ISO_TH);
+      g.lineTo(sx + ISO_TW, yy);
+      g.strokePath();
+    }
   },
 
   /* ---- Tile hover marker (pulsing diamond) ---- */
@@ -180,6 +214,23 @@ const Sprites = {
                 ok ? 0x3ca35c : 0xa63030, 3, 0.22, pulse);
   },
 
+  /* ---- Build-mode frame: thick green outline around the target tile.
+   *  Sits on top of the ghost sprite so the player can tell at a glance
+   *  that they're in placement mode, not just hovering. Renders red when
+   *  the spot isn't a legal placement. */
+  buildFrame(view, sx, sy, ok) {
+    const pulse = 0.7 + 0.3 * Math.sin(view.time * 6);
+    const fill   = ok ? 0x6bcf7f : 0xff4d4d;
+    const stroke = ok ? 0x2a9e4a : 0xa63030;
+    // Light translucent fill so the underlying ghost is still visible, plus
+    // a thick outline border on top.
+    drawDiamond(view.overlay, sx, sy, ISO_TW - 2, ISO_TH - 1,
+      fill, stroke, 4, 0.10, pulse);
+    // Inner accent border for extra prominence.
+    drawDiamond(view.overlay, sx, sy, ISO_TW - 8, ISO_TH - 4,
+      fill, stroke, 2, 0, pulse * 0.8);
+  },
+
   /* ---- Source-tile marker when the Move tool has a pickup active ---- */
   pickupMarker(view, sx, sy) {
     const pulse = 0.6 + 0.35 * Math.sin(view.time * 5);
@@ -187,6 +238,34 @@ const Sprites = {
     // the hover preview.
     drawDiamond(view.overlay, sx, sy, ISO_TW - 3, ISO_TH - 2,
                 0xffd84d, 0xc59b2e, 4, 0.18, pulse);
+  },
+
+  /* ---- Shared "broken" visual: red tint diamond + zigzag crack + ⚠ icon.
+   *  Drawn on top of any furniture sprite when b.broken is true so the
+   *  player can spot a broken item at a glance. */
+  drawBrokenOverlay(view, b, sx, sy) {
+    if (!b || !b.broken) return;
+    const { g, overlay, time, getText } = view;
+    // Red tint over the tile footprint.
+    drawDiamond(overlay, sx, sy, ISO_TW - 2, ISO_TH - 1,
+      0xff3030, 0x800000, 1, 0.20, 0.55);
+    // Slow pulsing zigzag crack across the body.
+    const pulse = 0.55 + 0.35 * Math.sin(time * 4 + (b.id || 0));
+    g.lineStyle(2.2, 0x1a1418, pulse);
+    g.beginPath();
+    g.moveTo(sx - 10, sy - 4);
+    g.lineTo(sx - 3,  sy - 16);
+    g.lineTo(sx + 2,  sy - 6);
+    g.lineTo(sx + 8,  sy - 22);
+    g.lineTo(sx + 11, sy - 12);
+    g.strokePath();
+    // Warning icon floating above the tile.
+    if (getText) {
+      getText('brk_' + (b.id || `${sx}_${sy}`), '⚠', sx, sy - 44, {
+        fontFamily: 'system-ui', fontSize: '14px', fontStyle: 'bold',
+        color: '#ff5050', stroke: '#000000', strokeThickness: 3,
+      });
+    }
   },
 
   /* ---- Stove ---- */
@@ -255,6 +334,64 @@ const Sprites = {
     } else if (b.reservedFor) {
       g.fillStyle(0xaaaaaa, 1); g.fillCircle(sx, sy - H, 3);
     }
+    if (b.broken) Sprites.drawBrokenOverlay(view, b, sx, sy);
+  },
+
+  /* ---- Catapult Stove: a stove with a spring-loaded launcher arm ---- */
+  catapult_stove(view, b, sx, sy) {
+    // Lean on the regular stove paint for the body, then bolt the arm on top.
+    Sprites.stove(view, b, sx, sy);
+    const { g, time } = view;
+    const H = 34;                                     // matches Sprites.stove
+    // Twang the arm briefly each time we fire (right after a projectile is
+    // launched). When idle, hold the cocked-back resting angle.
+    const lastFire = b._lastFireAt || -10;
+    const since = (time - lastFire);
+    const twang = since < 0.4 ? Math.sin(since * 18) * (1 - since / 0.4) : 0;
+    const angle = -0.7 + twang;                       // radians, cocked back
+    // Pivot point: top of the burner.
+    const px = sx, py = sy - H - 2;
+    const len = 18;
+    const ax = px + Math.cos(angle) * len;
+    const ay = py + Math.sin(angle) * len;
+    g.lineStyle(3, 0x8b6f3a, 1);
+    g.lineBetween(px, py, ax, ay);
+    g.fillStyle(0xffd84d, 1);
+    g.fillCircle(ax, ay, 3.5);
+    g.lineStyle(1.2, COLORS.outline, 1);
+    g.strokeCircle(ax, ay, 3.5);
+    // Spring base coil
+    g.lineStyle(1.4, 0xb8b8c0, 1);
+    g.strokeCircle(px, py, 4);
+    g.fillStyle(0xb8b8c0, 1);
+    g.fillCircle(px, py, 1.6);
+  },
+
+  /* ---- In-flight projectiles (parabolic arc from catapult to customer) ---- */
+  projectiles(view, sim) {
+    if (!sim.projectiles || !sim.projectiles.length) return;
+    const { g } = view;
+    for (const p of sim.projectiles) {
+      const t = Math.min(1, p.age / p.duration);
+      const { sx: fx, sy: fy } = gridToScreen(p.fromX, p.fromY);
+      const { sx: tx, sy: ty } = gridToScreen(p.toX,   p.toY);
+      const x = fx + (tx - fx) * t;
+      const y = fy + (ty - fy) * t - Math.sin(Math.PI * t) * 24;
+      const food = FOODS[p.foodType];
+      const col = food ? food.color : 0xffffff;
+      // Shadow on the ground
+      const sh = fy + (ty - fy) * t;
+      g.fillStyle(0x000000, 0.25);
+      g.fillEllipse(x, sh + 2, 8, 3);
+      // Plate
+      g.fillStyle(0xffffff, 1);
+      g.fillCircle(x, y, 5);
+      g.lineStyle(1, COLORS.outline, 1);
+      g.strokeCircle(x, y, 5);
+      // Food blob
+      g.fillStyle(col, 1);
+      g.fillCircle(x, y - 1, 3);
+    }
   },
 
   /* ---- Table ---- */
@@ -304,23 +441,40 @@ const Sprites = {
         g.fillCircle(sx + 2, sy - H + 1, 1.5);
       }
     }
+    if (b.broken) Sprites.drawBrokenOverlay(view, b, sx, sy);
   },
 
   /* ---- Chair ---- */
-  chair(view, b, sx, sy) {
+  chair(view, b, sx, sy, opts) {
     const { g, grid } = view;
-    const table = b.getAdjacentTable(grid);
-    if (!table) {
-      // Orphaned chair: low block with red X to signal uselessness.
-      drawIsoBox(g, sx, sy, 8, 0xaa7d55, 0x8a6040, 0x6b4830);
-      g.lineStyle(3, 0xff4d4d, 0.9);
-      g.lineBetween(sx - 8, sy - 4, sx + 8, sy - 12);
-      g.lineBetween(sx + 8, sy - 4, sx - 8, sy - 12);
-      return;
+    opts = opts || {};
+    // Three sources of facing, in priority order:
+    //   1. opts.facing — set when the move-ghost renderer wants a specific
+    //      orientation regardless of where the chair currently sits.
+    //   2. b.facing    — explicit rotation set by the player (RotateApp).
+    //   3. auto-detect from the table the chair is adjacent to. Falls back
+    //      to the orphan visual when there's no neighbouring table.
+    const explicit = (opts.facing != null) ? opts.facing
+                   : (b.facing  != null) ? b.facing
+                   : null;
+    let dx, dy;
+    const dirs = [[0, -1], [1, 0], [0, 1], [-1, 0]];   // N, E, S, W
+    if (explicit != null) {
+      const e = ((explicit | 0) % 4 + 4) % 4;
+      dx = dirs[e][0]; dy = dirs[e][1];
+    } else {
+      const table = b.getAdjacentTable(grid);
+      if (table) {
+        dx = Math.sign(table.x - b.x);
+        dy = Math.sign(table.y - b.y);
+      } else {
+        // No facing AND no adjacent table — render a generic chair facing
+        // north so the player still sees a chair (not a brown X block).
+        // RotateApp lets the player aim it after the fact; moving it next
+        // to a table re-engages auto-orient.
+        dx = 0; dy = -1;
+      }
     }
-
-    const dx = Math.sign(table.x - b.x);
-    const dy = Math.sign(table.y - b.y);
 
     const scale = 0.55;
     const stw   = ISO_TW * scale;
@@ -399,6 +553,7 @@ const Sprites = {
       g.fillRect(p.lx - legT / 2, p.ly - seatH, legT, seatH);
       g.strokeRect(p.lx - legT / 2, p.ly - seatH, legT, seatH);
     }
+    if (b.broken) Sprites.drawBrokenOverlay(view, b, sx, sy);
   },
 
   /* ---- Sink ---- */
@@ -448,6 +603,7 @@ const Sprites = {
     } else if (b.reservedFor) {
       g.fillStyle(0xaaaaaa, 1); g.fillCircle(sx, sy - H, 3);
     }
+    if (b.broken) Sprites.drawBrokenOverlay(view, b, sx, sy);
   },
 
   /* ---- Customer (body into g, bubbles/bars into overlay, labels via text) ---- */
@@ -457,23 +613,8 @@ const Sprites = {
     const stride = moving ? Math.sin(time * 12 + c.id) : 0;
     const bob    = moving ? Math.abs(Math.sin(time * 12 + c.id)) * 1.5 : 0;
 
-    // Shadow
-    g.fillStyle(0x000000, 0.3); g.fillEllipse(sx, sy + 2, 18, 6);
-
-    // Legs
-    const legTopY = sy - 8 - bob;
-    const lH = 8 + stride * 2, rH = 8 - stride * 2;
-    g.fillStyle(c.pantsColor, 1);
-    g.lineStyle(2, COLORS.outline, 1);
-    g.fillRect(sx - 5, legTopY, 4, lH);   g.strokeRect(sx - 5, legTopY, 4, lH);
-    g.fillRect(sx + 1, legTopY, 4, rH);   g.strokeRect(sx + 1, legTopY, 4, rH);
-    // Shoes
-    g.fillStyle(0x2a2028, 1);
-    g.fillEllipse(sx - 3, legTopY + lH + 1, 8, 4);
-    g.fillEllipse(sx + 3, legTopY + rH + 1, 8, 4);
-    g.lineStyle(1.2, COLORS.outline, 1);
-    g.strokeEllipse(sx - 3, legTopY + lH + 1, 8, 4);
-    g.strokeEllipse(sx + 3, legTopY + rH + 1, 8, 4);
+    // Shadow + legs + shoes
+    const legTopY = Sprites._drawLegsShoes(g, sx, sy, stride, bob, c.pantsColor);
 
     // Torso
     const torsoH = 13, torsoW = 22;
@@ -485,24 +626,11 @@ const Sprites = {
 
     // Arms + hands
     const armSwing = stride * 2;
-    g.fillStyle(c.bodyColor, 1);
-    g.fillRoundedRect(sx - torsoW/2 - 3, torsoY + 2, 4, 10 - armSwing, 2);
-    g.fillRoundedRect(sx + torsoW/2 - 1, torsoY + 2, 4, 10 + armSwing, 2);
-    g.lineStyle(2, COLORS.outline, 1);
-    g.strokeRoundedRect(sx - torsoW/2 - 3, torsoY + 2, 4, 10 - armSwing, 2);
-    g.strokeRoundedRect(sx + torsoW/2 - 1, torsoY + 2, 4, 10 + armSwing, 2);
-    g.fillStyle(c.skinColor, 1);
-    g.fillCircle(sx - torsoW/2 - 1, torsoY + 12 - armSwing, 3);
-    g.fillCircle(sx + torsoW/2 + 1, torsoY + 12 + armSwing, 3);
-    g.lineStyle(1.5, COLORS.outline, 1);
-    g.strokeCircle(sx - torsoW/2 - 1, torsoY + 12 - armSwing, 3);
-    g.strokeCircle(sx + torsoW/2 + 1, torsoY + 12 + armSwing, 3);
+    Sprites._drawArmsHands(g, sx, torsoY, torsoW, armSwing, c.bodyColor, c.skinColor);
 
     // Head
     const headR = 13;
-    const headY = torsoY - headR + 3;
-    g.fillStyle(c.skinColor, 1); g.fillCircle(sx, headY, headR);
-    g.lineStyle(2, COLORS.outline, 1); g.strokeCircle(sx, headY, headR);
+    const headY = Sprites._drawHeadCheeks(g, sx, torsoY, c.skinColor);
 
     // Hair
     if (c.hasHair && c.hat !== 2) {
@@ -525,9 +653,7 @@ const Sprites = {
     g.fillCircle(sx - 4 + c.facing.x * po - 0.5, eyeY - 0.5 + c.facing.y * 0.6, 0.8);
     g.fillCircle(sx + 4 + c.facing.x * po - 0.5, eyeY - 0.5 + c.facing.y * 0.6, 0.8);
     // Cheeks
-    g.fillStyle(0xff9fa8, 0.75);
-    g.fillEllipse(sx - 8, headY + 5, 4, 2.5);
-    g.fillEllipse(sx + 8, headY + 5, 4, 2.5);
+    Sprites._drawCheeks(g, sx, headY);
 
     // Mouth — state dependent
     const angry = c.anger > 70;
@@ -660,6 +786,59 @@ const Sprites = {
     }
   },
 
+  /* ---- Shared character primitives (used by both customer + employee) ---- */
+  /** Draws shadow + legs + shoes. Returns legTopY for the caller to chain
+   *  the torso/arms/head off. Stride drives the swing of the two legs. */
+  _drawLegsShoes(g, sx, sy, stride, bob, pantsColor) {
+    g.fillStyle(0x000000, 0.3); g.fillEllipse(sx, sy + 2, 18, 6);
+    const legTopY = sy - 8 - bob;
+    const lH = 8 + stride * 2, rH = 8 - stride * 2;
+    g.fillStyle(pantsColor, 1);
+    g.lineStyle(2, COLORS.outline, 1);
+    g.fillRect(sx - 5, legTopY, 4, lH);   g.strokeRect(sx - 5, legTopY, 4, lH);
+    g.fillRect(sx + 1, legTopY, 4, rH);   g.strokeRect(sx + 1, legTopY, 4, rH);
+    g.fillStyle(0x2a2028, 1);
+    g.fillEllipse(sx - 3, legTopY + lH + 1, 8, 4);
+    g.fillEllipse(sx + 3, legTopY + rH + 1, 8, 4);
+    g.lineStyle(1.2, COLORS.outline, 1);
+    g.strokeEllipse(sx - 3, legTopY + lH + 1, 8, 4);
+    g.strokeEllipse(sx + 3, legTopY + rH + 1, 8, 4);
+    return legTopY;
+  },
+
+  /** Draws sleeves + skin-coloured hand circles around a torso of width
+   *  torsoW at vertical position torsoY. armSwing comes from stride. */
+  _drawArmsHands(g, sx, torsoY, torsoW, armSwing, sleeveColor, skinColor) {
+    g.fillStyle(sleeveColor, 1);
+    g.fillRoundedRect(sx - torsoW/2 - 3, torsoY + 2, 4, 10 - armSwing, 2);
+    g.fillRoundedRect(sx + torsoW/2 - 1, torsoY + 2, 4, 10 + armSwing, 2);
+    g.lineStyle(2, COLORS.outline, 1);
+    g.strokeRoundedRect(sx - torsoW/2 - 3, torsoY + 2, 4, 10 - armSwing, 2);
+    g.strokeRoundedRect(sx + torsoW/2 - 1, torsoY + 2, 4, 10 + armSwing, 2);
+    g.fillStyle(skinColor, 1);
+    g.fillCircle(sx - torsoW/2 - 1, torsoY + 12 - armSwing, 3);
+    g.fillCircle(sx + torsoW/2 + 1, torsoY + 12 + armSwing, 3);
+    g.lineStyle(1.5, COLORS.outline, 1);
+    g.strokeCircle(sx - torsoW/2 - 1, torsoY + 12 - armSwing, 3);
+    g.strokeCircle(sx + torsoW/2 + 1, torsoY + 12 + armSwing, 3);
+  },
+
+  /** Draws head circle + cheeks. Returns headY (so the caller can stack
+   *  hats/eyes/mouths above and below). */
+  _drawHeadCheeks(g, sx, torsoY, skinColor) {
+    const headR = 13;
+    const headY = torsoY - headR + 3;
+    g.fillStyle(skinColor, 1); g.fillCircle(sx, headY, headR);
+    g.lineStyle(2, COLORS.outline, 1); g.strokeCircle(sx, headY, headR);
+    return headY;
+  },
+
+  _drawCheeks(g, sx, headY) {
+    g.fillStyle(0xff9fa8, 0.75);
+    g.fillEllipse(sx - 8, headY + 5, 4, 2.5);
+    g.fillEllipse(sx + 8, headY + 5, 4, 2.5);
+  },
+
   /* ---- Employee ---- */
   employee(view, e, sx, sy) {
     const { g, time, getText } = view;
@@ -670,22 +849,8 @@ const Sprites = {
     const stride = moving ? Math.sin(time * stridePace + e.id) : 0;
     const bob    = moving ? Math.abs(Math.sin(time * stridePace + e.id)) * 1.5 : 0;
 
-    // Shadow
-    g.fillStyle(0x000000, 0.3); g.fillEllipse(sx, sy + 2, 18, 6);
-
-    // Legs (navy pants)
-    const legTopY = sy - 8 - bob;
-    const lH = 8 + stride * 2, rH = 8 - stride * 2;
-    g.fillStyle(0x2a4a70, 1);
-    g.lineStyle(2, COLORS.outline, 1);
-    g.fillRect(sx - 5, legTopY, 4, lH); g.strokeRect(sx - 5, legTopY, 4, lH);
-    g.fillRect(sx + 1, legTopY, 4, rH); g.strokeRect(sx + 1, legTopY, 4, rH);
-    g.fillStyle(0x2a2028, 1);
-    g.fillEllipse(sx - 3, legTopY + lH + 1, 8, 4);
-    g.fillEllipse(sx + 3, legTopY + rH + 1, 8, 4);
-    g.lineStyle(1.2, COLORS.outline, 1);
-    g.strokeEllipse(sx - 3, legTopY + lH + 1, 8, 4);
-    g.strokeEllipse(sx + 3, legTopY + rH + 1, 8, 4);
+    // Shadow + legs + shoes (navy pants)
+    const legTopY = Sprites._drawLegsShoes(g, sx, sy, stride, bob, 0x2a4a70);
 
     // Apron torso
     const torsoH = 14, torsoW = 24;
@@ -702,26 +867,13 @@ const Sprites = {
     g.lineStyle(1.2, COLORS.outline, 0.7);
     g.strokeRoundedRect(sx - 5, torsoY + 6, 10, 6, 1);
 
-    // Arms + hands
+    // Arms + hands (white sleeves)
     const armSwing = stride * 2;
-    g.fillStyle(0xffffff, 1);
-    g.fillRoundedRect(sx - torsoW/2 - 3, torsoY + 2, 4, 10 - armSwing, 2);
-    g.fillRoundedRect(sx + torsoW/2 - 1, torsoY + 2, 4, 10 + armSwing, 2);
-    g.lineStyle(2, COLORS.outline, 1);
-    g.strokeRoundedRect(sx - torsoW/2 - 3, torsoY + 2, 4, 10 - armSwing, 2);
-    g.strokeRoundedRect(sx + torsoW/2 - 1, torsoY + 2, 4, 10 + armSwing, 2);
-    g.fillStyle(e.skinColor, 1);
-    g.fillCircle(sx - torsoW/2 - 1, torsoY + 12 - armSwing, 3);
-    g.fillCircle(sx + torsoW/2 + 1, torsoY + 12 + armSwing, 3);
-    g.lineStyle(1.5, COLORS.outline, 1);
-    g.strokeCircle(sx - torsoW/2 - 1, torsoY + 12 - armSwing, 3);
-    g.strokeCircle(sx + torsoW/2 + 1, torsoY + 12 + armSwing, 3);
+    Sprites._drawArmsHands(g, sx, torsoY, torsoW, armSwing, 0xffffff, e.skinColor);
 
     // Head
     const headR = 13;
-    const headY = torsoY - headR + 3;
-    g.fillStyle(e.skinColor, 1); g.fillCircle(sx, headY, headR);
-    g.lineStyle(2, COLORS.outline, 1); g.strokeCircle(sx, headY, headR);
+    const headY = Sprites._drawHeadCheeks(g, sx, torsoY, e.skinColor);
 
     // Hair (if the preset has it and hat won't fully cover). Skip for the
     // toque and the top hat — they cover the scalp.
@@ -769,9 +921,7 @@ const Sprites = {
     g.fillStyle(0xffffff, 1);
     g.fillCircle(sx - 4 + e.facing.x * 1.2 - 0.5, eyeY - 0.5 + e.facing.y * 0.5, 0.7);
     g.fillCircle(sx + 4 + e.facing.x * 1.2 - 0.5, eyeY - 0.5 + e.facing.y * 0.5, 0.7);
-    g.fillStyle(0xff9fa8, 0.75);
-    g.fillEllipse(sx - 8, headY + 5, 4, 2.5);
-    g.fillEllipse(sx + 8, headY + 5, 4, 2.5);
+    Sprites._drawCheeks(g, sx, headY);
     g.lineStyle(2.5, 0x3a2818, 1);
     g.beginPath(); g.arc(sx - 3, headY + 6, 3, Math.PI * 0.1, Math.PI * 0.9, false); g.strokePath();
     g.beginPath(); g.arc(sx + 3, headY + 6, 3, Math.PI * 0.1, Math.PI * 0.9, false); g.strokePath();

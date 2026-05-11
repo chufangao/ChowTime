@@ -21,6 +21,6 @@ module.exports = {
   expect(result, sim) {
     if (result.dayState !== 'dayEnd') throw new Error('day1 didn\'t finish');
     if (sim.daySpawned < sim.dayQuota) throw new Error('quota not met');
-    if (sim.lives < 1) throw new Error('lost too many lives on the easy scenario');
+    if (sim.reputation < 1) throw new Error('lost too much reputation on the easy scenario');
   },
 };

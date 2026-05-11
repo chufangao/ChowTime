@@ -73,6 +73,14 @@ test('starstruck chef adds 25% tip multiplier', () => {
   assert.equal(boosted, Math.round(baseline * 1.25));
 });
 
+test('higher INT yields higher average plate quality (the input to tip)', () => {
+  const ctx = loadSim({ seed: 1 });
+  const avgN = (f, n) => { let s = 0; for (let i = 0; i < n; i++) s += f(); return s / n; };
+  const lowAvg  = avgN(() => ctx.computeQuality(2),  500);
+  const highAvg = avgN(() => ctx.computeQuality(10), 500);
+  assert.ok(highAvg > lowAvg, `high-INT avg ${highAvg} should beat low-INT ${lowAvg}`);
+});
+
 test('chef showstopper ability stacks with customer big_tipper', () => {
   const ctx = loadSim({ seed: 1 });
   const baseCtx = loadSim({ seed: 1 });

@@ -123,18 +123,26 @@ class Employee extends Entity {
       this.task = { order: o, stove };
       this.setPath(path); this.state = ES.TO_STOVE_PICKUP; return;
     }
-    // Priority 2: start cooking a pending order.
+    // Priority 2: start cooking a pending order. Catapult stoves are tried
+    // first (they skip the deliver walk entirely, so they're always the
+    // better tool when free) — regular stoves are the fallback.
     for (const o of sim.orders) {
       if (o.status !== 'pending' || o.cookingEmployee) continue;
-      for (const stove of sim.buildings) {
-        if (stove.type !== 'stove' || !stove.isAvailable()) continue;
-        const path = this.pathToAdjacent(sim, stove.x, stove.y);
-        if (!path) continue;
-        o.cookingEmployee = this; o.assignedStove = stove;
-        stove.reservedFor = o;
-        this.task = { order: o, stove };
-        this.setPath(path); this.state = ES.TO_STOVE_COOK; return;
+      let chosenStove = null, chosenPath = null;
+      for (const wantType of ['catapult_stove', 'stove']) {
+        for (const stove of sim.buildings) {
+          if (stove.type !== wantType || !stove.isAvailable()) continue;
+          const path = this.pathToAdjacent(sim, stove.x, stove.y);
+          if (!path) continue;
+          chosenStove = stove; chosenPath = path; break;
+        }
+        if (chosenStove) break;
       }
+      if (!chosenStove) continue;
+      o.cookingEmployee = this; o.assignedStove = chosenStove;
+      chosenStove.reservedFor = o;
+      this.task = { order: o, stove: chosenStove };
+      this.setPath(chosenPath); this.state = ES.TO_STOVE_COOK; return;
     }
     // Priority 3: clear a dirty plate.
     for (const b of sim.buildings) {

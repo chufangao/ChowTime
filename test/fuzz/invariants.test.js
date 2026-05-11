@@ -14,7 +14,10 @@ function buildRandomLayout(ctx, sim, rng) {
   // Random but always-viable layout: at least one stove, sink, and dining
   // unit. Uses the passed-in seeded `rng` (NOT host Math.random) so the same
   // seed always builds the same layout — required for the determinism test.
-  sim.placeBuilding('stove', 10, 1, true);
+  // 30% of layouts swap that lone stove for a Catapult Stove — invariants
+  // (money finite, no orphan cooking, no NaN positions) must still hold.
+  const stoveType = rng() < 0.3 ? 'catapult_stove' : 'stove';
+  sim.placeBuilding(stoveType, 10, 1, true);
   sim.placeBuilding('sink',  10, 7, true);
   sim.placeBuilding('chair',  3, 2, true);
   sim.placeBuilding('table',  3, 3, true);
@@ -44,10 +47,10 @@ function buildRandomLayout(ctx, sim, rng) {
 function checkInvariants(sim) {
   assert.ok(Number.isFinite(sim.money), `money not finite: ${sim.money}`);
   assert.ok(sim.money >= 0, `money negative: ${sim.money}`);
-  assert.ok(sim.lives >= 0 && sim.lives <= sim.livesMax,
-    `lives out of range: ${sim.lives} (max ${sim.livesMax})`);
-  if (sim.lives === 0) {
-    assert.equal(sim.gameOver, true, 'lives at 0 must imply gameOver');
+  assert.ok(sim.reputation >= 0 && sim.reputation <= sim.reputationMax,
+    `reputation out of range: ${sim.reputation} (max ${sim.reputationMax})`);
+  if (sim.reputation === 0) {
+    assert.equal(sim.gameOver, true, 'reputation at 0 must imply gameOver');
   }
   // Cooking orders must have a chef assigned (not orphaned mid-cook).
   for (const o of sim.orders) {
@@ -81,8 +84,13 @@ for (let i = 0; i < SEEDS_TO_RUN; i++) {
     checkInvariants(sim);
     // After the run, no orders should be in 'cooking' or 'ready' (every
     // pending plate should resolve to delivered/abandoned/lost or be pruned).
-    for (const o of sim.orders) {
-      assert.notEqual(o.status, 'ready', `lingering ready order at end`);
+    // Exception: a game-over mid-shift freezes the world with whatever was
+    // in flight, so we only enforce the clean-end invariant on runs that
+    // actually reach dayEnd.
+    if (!sim.gameOver) {
+      for (const o of sim.orders) {
+        assert.notEqual(o.status, 'ready', `lingering ready order at end`);
+      }
     }
   });
 }

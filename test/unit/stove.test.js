@@ -84,3 +84,13 @@ test('Sink finishes washing after 2s', () => {
   for (let i = 0; i < 30; i++) sink.update(0.1);   // 3s
   assert.equal(sink.isWashing(), false);
 });
+
+test('computeQuality stays within [0, 2] across the full INT range', () => {
+  const ctx = loadSim({ seed: 1 });
+  for (let i = 0; i < 200; i++) {
+    for (let intStat = 0; intStat <= 10; intStat += 1) {
+      const q = ctx.computeQuality(intStat);
+      assert.ok(q >= 0 && q <= 2, `quality ${q} out of [0,2] for INT ${intStat}`);
+    }
+  }
+});

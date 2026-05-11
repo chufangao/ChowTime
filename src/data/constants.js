@@ -4,7 +4,7 @@
 
 /* ---- Grid dimensions ------------------------------------------------------- */
 const COLS = 12;
-const ROWS = 8;
+const ROWS = 12;
 
 /* ---- Food menu (gameplay + a bit of display info) -------------------------- */
 const FOODS = {
@@ -18,16 +18,27 @@ const FOOD_KEYS = Object.keys(FOODS);
 /* ---- Gameplay tuning ------------------------------------------------------- */
 const CONFIG = {
   customerSpawnInterval: 6,
-  customerMaxConcurrent: 12,
-  customerSpeed:         3.2,
+  // Each day past day 1, the effective spawn interval shrinks by this many
+  // seconds. Floor at customerSpawnIntervalMin so the rate stays solveable.
+  customerSpawnIntervalPerDay: 0.2,
+  customerSpawnIntervalMin:    0.1,
+  customerSpeed:               3.2,
   eatDuration:           6,
   angerMax:              100,
   angerRates: { seekingSeat: 2.5, walkingToSeat: 1.0, waitingFood: 3.5, eating: 0 },
   employeeSpeed: 4.5,
   startingMoney: 200,
-  costs: { stove: 150, table: 50, chair: 20, sink: 120, employee: 200 },
+  costs: {
+    stove: 150, catapult_stove: 300, table: 50, chair: 20, sink: 120, employee: 200,
+    floor: 150,                // fill a default-layout gap with solid floor
+    player_wall: 0,            // free, lightweight partition
+    move_furniture: 80,        // anything except table, chair, player_wall
+  },
   refundRatio: 0.5,
-  trafficLevels: [1, 2, 3, 5],
+  reputationMax: 100,
+  reputationStart: 100,
+  reputationAngryHit: 15,
+  reputationDailyBonus: 1,
   speedLevels:   [1, 2, 4],
   tiredMult:     0.75,   // scales all stats (except STR) while a chef is tired
   tipRateBase:   0.15,   // baseline tip fraction of meal price at quality×cha = 1

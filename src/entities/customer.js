@@ -100,10 +100,16 @@ class Customer extends Entity {
         this.state = CS.SEEKING;
         break;
       case CS.SEEKING: {
-        // Compute my place in the arrival-ordered queue.
-        const seekers = sim.getSeekingCustomers();
-        const myIdx = seekers.indexOf(this);
-        const slot = sim.getQueueSlot(myIdx);
+        // Compute my place in the arrival-ordered queue at MY door. Each door
+        // queues independently; multiple front-of-line customers may try to
+        // seat in parallel.
+        const slot = sim.getQueueSlot(this);
+        const myDoor = this.entryDoor || sim.spawnTiles[0];
+        const seekersHere = sim.customers
+          .filter(s => s.alive && (s.state === CS.SEEKING || s.state === CS.ENTERING))
+          .filter(s => !s.entryDoor || (s.entryDoor.x === myDoor.x && s.entryDoor.y === myDoor.y))
+          .sort((a, b) => a.spawnTime - b.spawnTime);
+        const myIdx = seekersHere.indexOf(this);
 
         // Re-target whenever my slot shifts (someone ahead got seated).
         const slotChanged = !this.queueSlot ||
@@ -143,7 +149,9 @@ class Customer extends Entity {
         if (this.table && this.table.plate && !this.table.plate.dirty &&
             this.table.plate.foodType === this.foodPref) {
           this.state = CS.EATING;
-          this.eatTimer = CONFIG.eatDuration * abilityMult(this, 'eatTimeMult', this.foodPref);
+          // Broken tables eat twice as slow (wobbly cutlery, sticky surface…).
+          const brokenMult = this.table.broken ? 2 : 1;
+          this.eatTimer = CONFIG.eatDuration * abilityMult(this, 'eatTimeMult', this.foodPref) * brokenMult;
           fireAbilityHook(this, 'onEat', { sim, foodKey: this.foodPref });
         }
         break;
@@ -245,10 +253,10 @@ class Customer extends Entity {
     // stat and costs a life.
     if (reason === 'angry') {
       sim.stats.angry++; sim.runStats.angry++;
-      if (!sim.gameOver) {
-        sim.lives--;
-        if (sim.lives <= 0) {
-          sim.lives = 0;
+      if (!sim.gameOver && !sim.debug) {
+        sim.reputation -= (CONFIG.reputationAngryHit || 0);
+        if (sim.reputation <= 0) {
+          sim.reputation = 0;
           sim.gameOver = true;
           sim.spawnEnabled = false;
         }
@@ -257,10 +265,13 @@ class Customer extends Entity {
     // Happy-path earnings are credited per course in _consumePlate; nothing
     // else to do here beyond the state transition and exit path.
 
-    // Queue-giver-upper: off-grid, just storm west.
-    if (this.x < 0) { this.setPath([{ x: -5, y: this.y }]); return; }
+    // Queue-giver-upper: already off-grid, just keep walking outward.
+    if (this.x < 0)                  { this.setPath([{ x: -5, y: this.y }]); return; }
+    if (this.x >= sim.grid.cols)     { this.setPath([{ x: sim.grid.cols + 5, y: this.y }]); return; }
+    if (this.y < 0)                  { this.setPath([{ x: this.x, y: -5 }]); return; }
+    if (this.y >= sim.grid.rows)     { this.setPath([{ x: this.x, y: sim.grid.rows + 5 }]); return; }
 
-    const exit = sim.exitTile;
+    const exit = sim.closestSpawn(this.tileX(), this.tileY());
     const path = sim.pathfinder.findPath(
       this.tileX(), this.tileY(),
       (x, y) => x === exit.x && y === exit.y,

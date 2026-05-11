@@ -13,23 +13,27 @@ test('customer anger maxes out then triggers angry leave', () => {
   // Tick fast enough to push past angerMax. Default seekingSeat rate is 2.5/s.
   // Push it to max with a single huge dt so internal min/max guards trigger.
   c.anger = ctx.CONFIG.angerMax - 1;
+  const expected = sim.reputation - ctx.CONFIG.reputationAngryHit;
   sim.update(1.0);
   assert.equal(c.state, 'leaving');
   assert.equal(c.leftReason, 'angry');
-  assert.equal(sim.lives, 2, 'angry rage-quit costs one life');
+  assert.equal(sim.reputation, expected, 'angry rage-quit deducts reputationAngryHit');
 });
 
-test('lives clamp to 0 and trigger gameOver', () => {
+test('reputation clamps to 0 and triggers gameOver', () => {
   const ctx = loadSim({ seed: 1 });
   const sim = new ctx.Simulation();
   sim.spawnEnabled = false;
-  for (let i = 0; i < 3; i++) {
+  // Enough angry customers to push reputation past 0. With angryHit=15 and
+  // start=100, 7 angry customers (-105) more than covers it.
+  const need = Math.ceil(sim.reputation / ctx.CONFIG.reputationAngryHit) + 1;
+  for (let i = 0; i < need; i++) {
     sim.spawnCustomer();
     const c = sim.customers[sim.customers.length - 1];
     c.anger = ctx.CONFIG.angerMax;
     sim.update(0.1);
   }
-  assert.equal(sim.lives, 0);
+  assert.equal(sim.reputation, 0);
   assert.equal(sim.gameOver, true);
   assert.equal(sim.spawnEnabled, false);
 });

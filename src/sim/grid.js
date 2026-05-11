@@ -17,13 +17,13 @@ class Grid {
   setType(x, y, type) { const t = this.getTile(x, y); if (t) t.type = type; }
   isWalkable(x, y) {
     const t = this.getTile(x, y);
-    if (!t || t.type === 'wall') return false;
+    if (!t || t.type === 'wall' || t.type === 'gap') return false;
     if (t.building && !t.building.walkable) return false;
     return true;
   }
   placeBuilding(b, x, y) {
     const t = this.getTile(x, y);
-    if (!t || t.building || t.type === 'wall') return false;
+    if (!t || t.building || t.type === 'wall' || t.type === 'gap') return false;
     t.building = b; b.tile = t; b.x = x; b.y = y;
     return true;
   }

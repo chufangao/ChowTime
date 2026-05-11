@@ -173,7 +173,7 @@
     <div class="menu-rules">
       <h4>Quick Rules</h4>
       <ul>
-        <li>You have <strong>3 lives ❤️</strong>. Each customer who leaves in a rage costs one.</li>
+        <li>You start with <strong>100 reputation ★</strong>. Every angry customer costs 15; hitting daily quota earns 1 back.</li>
         <li>Between days, a random event needs a chef — assigning one costs you that chef the next day.</li>
         <li>Tomorrow's forecast hints at crowd size, food bias, or tip mood — plan around it.</li>
         <li><kbd>Right-click</kbd> to remove furniture or cancel a Move pickup.</li>
@@ -181,6 +181,11 @@
     </div>
 
     <button class="play-btn" id="play-btn">▶ Play</button>
+    <button class="play-btn" id="load-btn"
+      style="margin-top:10px; background:linear-gradient(180deg,#4a90e2 0%,#2e63a8 100%); border-color:#1f4a82; box-shadow:0 5px 0 #1f4a82,0 10px 24px rgba(0,0,0,0.45); font-size:18px;">
+      📂 Load Save
+    </button>
+    <input type="file" id="load-save-input" accept=".json,application/json" style="display:none">
   </div>
 </div>
 
@@ -198,6 +203,8 @@
      sprites.js computes canvas dimensions from those and defines Sprites.
      scene.js exposes startChowTime() as the launch hook. -->
 <script src="./src/data/constants.js"></script>
+<script src="./src/data/layouts.js"></script>
+<script src="./src/data/layout_generator.js"></script>
 <script src="./src/data/abilities.js"></script>
 <script src="./src/data/events_forecasts.js"></script>
 <script src="./src/data/chef_presets.js"></script>
@@ -206,11 +213,27 @@
 <script src="./sprites.js"></script>
 <script src="./src/entities/customer.js"></script>
 <script src="./src/entities/employee.js"></script>
+<script src="./src/sim/event_manager.js"></script>
+<script src="./src/sim/day_state_machine.js"></script>
 <script src="./src/sim/simulation.js"></script>
+<script src="./src/sim/save_load.js"></script>
+<!-- UI shell: loaded after sim so apps can reference Simulation/Employee. -->
+<script src="./src/ui/app.js"></script>
+<script src="./src/ui/app_manager.js"></script>
+<script src="./src/ui/widgets.js"></script>
+<script src="./src/ui/top_bar.js"></script>
+<script src="./src/ui/apps/build_app.js"></script>
+<script src="./src/ui/apps/hire_app.js"></script>
+<script src="./src/ui/apps/settings_app.js"></script>
+<script src="./src/ui/apps/map_tools.js"></script>
+<script src="./src/ui/apps/day_end_app.js"></script>
+<script src="./src/ui/apps/start_day_app.js"></script>
+<script src="./src/ui/apps/midday_event_app.js"></script>
+<script src="./src/ui/apps/game_over_app.js"></script>
 <script src="./scene.js"></script>
 <script>
   // Bootstrap: scene.js does not auto-start the Phaser game; we call it
-  // when the player clicks Play.
+  // when the player clicks Play, or feed it a save JSON when they Load.
   const menu = document.getElementById('menu');
   const app  = document.getElementById('app');
 
@@ -219,6 +242,46 @@
     app.classList.add('on');
     window.startChowTime();
   });
+
+  // Load Save flow: a hidden file input on the start menu wired to a
+  // FileReader. The same input is re-triggered from the in-game Settings app
+  // (see scene._handleLoad), which calls input.click() — file selection
+  // handling lives here in one place.
+  const loadInput = document.getElementById('load-save-input');
+  document.getElementById('load-btn').addEventListener('click', () => loadInput.click());
+  loadInput.addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      let json;
+      try { json = JSON.parse(ev.target.result); }
+      catch (err) { alert('Could not parse save file: ' + err.message); return; }
+      if (window.__chowTimeInstance) {
+        // In-game load: reload the page then auto-launch with the save.
+        // Cleaner than tearing down a live Phaser game in place.
+        sessionStorage.setItem('pending-save', JSON.stringify(json));
+        window.location.reload();
+      } else {
+        menu.style.display = 'none';
+        app.classList.add('on');
+        window.startChowTime({ saveJson: json });
+      }
+    };
+    reader.readAsText(file);
+  });
+
+  // If a save is pending from a reload (in-game load flow), pick it up.
+  const pending = sessionStorage.getItem('pending-save');
+  if (pending) {
+    sessionStorage.removeItem('pending-save');
+    try {
+      const json = JSON.parse(pending);
+      menu.style.display = 'none';
+      app.classList.add('on');
+      window.startChowTime({ saveJson: json });
+    } catch (e) { /* fall through to normal start menu */ }
+  }
 
   document.getElementById('to-menu').addEventListener('click', () => {
     if (confirm('Leave to the menu? Your current run will be lost.')) {

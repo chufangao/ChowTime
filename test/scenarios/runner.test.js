@@ -13,7 +13,7 @@ for (const file of scenarioFiles) {
   test(`scenario: ${scenario.name}`, () => {
     const ctx = loadSim({ seed: scenario.seed || 1 });
     const sim = new ctx.Simulation();
-    scenario.build(sim);
+    scenario.build(sim, ctx);
     const result = runScenario(sim, {
       steps: scenario.steps || [],
       untilDay: scenario.untilDay || 1,

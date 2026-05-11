@@ -14,6 +14,28 @@ function runScenario(sim, opts) {
   // terminate. Defaults true for ergonomics; set false to drive manually.
   const autoResolveEvents = opts.autoResolveEvents !== false;
 
+  // Suppress midday events by default — most existing scenarios predate
+  // mid-service interrupts and break in unpredictable ways when an event
+  // (e.g. critic_walks_in) spends reputation and triggers game over partway
+  // through. Tests for midday behavior opt back in with enableMidday: true.
+  // We replace the maybeStartMiddayEvent method entirely so day transitions
+  // can't re-arm the roll.
+  if (!opts.enableMidday && sim.eventManager) {
+    sim.eventManager.maybeStartMiddayEvent = () => false;
+  }
+
+  // Boot state is dayEnd; advance into Day 1 by rolling and auto-accepting
+  // the gift (the UI does this via DayEndApp; tests skip the UI so we
+  // do it here once before driving the loop).
+  if (sim.dayState === 'dayEnd' && !sim.eventOutcome) {
+    if (typeof sim.ensureBootEvent === 'function') sim.ensureBootEvent();
+    if (sim.currentEvent && sim.currentEvent.kind === 'gift') {
+      const opts = sim.currentEvent.options || [];
+      if (opts.length) sim.acceptGift(opts[0].id);
+      if (sim.eventOutcome) sim.startNextDay();
+    }
+  }
+
   let t = 0;
   while (sim.day <= untilDay && !sim.gameOver) {
     while (steps.length && steps[0].at <= t) {
@@ -23,6 +45,38 @@ function runScenario(sim, opts) {
     sim.update(dt);
     t += dt;
     if (onTick) onTick(sim, t);
+
+    // Auto-resolve midday events. Always on (independent of
+    // autoResolveEvents, which gates dayEnd-event auto-clickthrough) because
+    // midday events are an active pause: a test cannot inspect & continue
+    // without resolving. Picks the first affordable choice, then dismisses.
+    if (sim.dayState === 'midday_event') {
+      if (!sim.middayOutcome) {
+        const choices = (sim.middayEvent && sim.middayEvent.choices) || [];
+        let resolved = false;
+        for (let i = 0; i < choices.length && !resolved; i++) {
+          const ch = choices[i];
+          const cost = ch.cost || {};
+          if ((cost.money || 0) > 0 && sim.money < cost.money) continue;
+          if ((cost.reputation || 0) > 0 && sim.reputation < cost.reputation) continue;
+          if (ch.kind === 'pay') {
+            sim.resolveMiddayChoice(i);
+            resolved = true;
+          } else {
+            const chefs = (typeof sim.eligibleChefsForMidday === 'function')
+              ? sim.eligibleChefsForMidday(ch.stat) : [];
+            if (chefs.length) {
+              sim.resolveMiddayChoice(i, chefs[0].id);
+              resolved = true;
+            }
+          }
+        }
+        // Last-resort: if nothing was affordable/usable, force the first
+        // choice through so the test doesn't stall.
+        if (!resolved && choices.length) sim.resolveMiddayChoice(0);
+      }
+      if (sim.middayOutcome) sim.dismissMiddayOutcome();
+    }
 
     if (sim.dayState === 'dayEnd') {
       if (autoResolveEvents) {
@@ -47,9 +101,9 @@ function runScenario(sim, opts) {
   }
   return {
     endTime: t,
-    money:   sim.money,
-    lives:   sim.lives,
-    day:     sim.day,
+    money:      sim.money,
+    reputation: sim.reputation,
+    day:        sim.day,
     dayState: sim.dayState,
     served:  sim.runStats.served,
     angry:   sim.runStats.angry,
