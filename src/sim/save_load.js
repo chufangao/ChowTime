@@ -101,7 +101,6 @@ function serializeSim(sim, uiState) {
           statusOverride: sim.eventOutcome.result.statusOverride ? { ...sim.eventOutcome.result.statusOverride } : null,
         } : null,
       } : null,
-      eventAssignedChefId: sim.eventAssignedChef ? sim.eventAssignedChef.id : null,
       // Midday event (mid-service). Live def is re-linked at load via id.
       middayEventId: sim.middayEvent ? sim.middayEvent.id : null,
       middayEventRolledToday: !!sim.middayEventRolledToday,
@@ -119,6 +118,12 @@ function serializeSim(sim, uiState) {
         chefId:    sim.middayOutcome.chef ? sim.middayOutcome.chef.id : null,
       } : null,
       freeBuildCredits: (sim.freeBuildCredits || []).slice(),
+      // Event history log (per-run, persists across days). One small object
+      // per resolution; the Review tab renders these. We store plain
+      // serialisable fields only — see EventManager._logHistoryEntry.
+      eventHistory: Array.isArray(sim.eventHistory)
+        ? sim.eventHistory.map(h => ({ ...h }))
+        : [],
       trafficMultiplier: sim.trafficMultiplier,
       spawnTiles: (sim.spawnTiles || [sim.spawnTile]).map(d => ({ x: d.x, y: d.y })),
       layoutId: sim.layoutId || null,
@@ -241,13 +246,15 @@ function deserializeSim(json) {
     for (const d of sim.spawnTiles) sim.grid.setType(d.x, d.y, 'spawn');
   }
 
-  // Re-link cross-references by id. Gift events aren't in EVENTS — re-roll
+  // Re-link the day-end event by id. Gift events aren't in EVENTS — re-roll
   // a fresh gift if the saved event was the boot gift and the player hadn't
-  // resolved it yet.
+  // resolved it yet. (After resolution we still re-link to EVENTS by id so
+  // eventOutcome's chef ref + msg display work; the choice closures aren't
+  // needed once the outcome is set.)
   if (data.currentEventKind === 'gift' && !data.eventOutcome && typeof rollGiftEvent === 'function') {
     sim.currentEvent = rollGiftEvent();
-  } else if (data.currentEventId && typeof EVENTS !== 'undefined') {
-    sim.currentEvent = EVENTS.find(e => e.id === data.currentEventId) || null;
+  } else if (data.currentEventId && typeof getDailyEventById === 'function') {
+    sim.currentEvent = getDailyEventById(data.currentEventId);
   } else {
     sim.currentEvent = null;
   }
@@ -265,11 +272,9 @@ function deserializeSim(json) {
   } else {
     sim.eventOutcome = null;
   }
-  sim.eventAssignedChef = idMap.employees.get(data.eventAssignedChefId) || null;
-
-  // Midday event re-link. The live def is looked up by id from MIDDAY_EVENTS.
-  if (data.middayEventId && typeof MIDDAY_EVENTS !== 'undefined') {
-    sim.middayEvent = MIDDAY_EVENTS.find(e => e.id === data.middayEventId) || null;
+  // Midday event re-link via the id-lookup helper.
+  if (data.middayEventId && typeof getMiddayEventById === 'function') {
+    sim.middayEvent = getMiddayEventById(data.middayEventId);
   } else {
     sim.middayEvent = null;
   }
@@ -294,6 +299,9 @@ function deserializeSim(json) {
     sim.middayOutcome = null;
   }
   sim.freeBuildCredits = Array.isArray(data.freeBuildCredits) ? data.freeBuildCredits.slice() : [];
+  sim.eventHistory     = Array.isArray(data.eventHistory)
+    ? data.eventHistory.map(h => ({ ...h }))
+    : [];
 
   return { sim, uiState: json.ui || null };
 }

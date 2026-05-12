@@ -1,32 +1,49 @@
 /* ============================================================================
- * src/ui/apps/midday_event_app.js — Midday event modal
+ * src/ui/apps/midday_event_app.js — Unified event modal
  * ============================================================================
- * Auto-opens whenever sim.middayEvent is set (sim.dayState === 'midday_event').
- * Renders the event title/flavor + a card per choice. Each choice has one of
- * four kinds:
+ * Renders the choice modal for ALL events: midday (fires during 'spawning' /
+ * 'draining'), end-of-day (dayState === 'dayEnd'), AND the Day-1 boot gift.
+ * The data shape is uniform — events expose a `choices` array whose entries
+ * are one of:
  *
  *   - 'pay'     — click-through, deducts money/reputation, applies onResolve
  *   - 'roll'    — picks a chef, rolls 1d10 + stat vs DC
  *   - 'ability' — picks a chef who must have abilityId, applies onResolve
  *   - 'hybrid'  — pays cost AND rolls (chef pick required)
  *
- * Two phases:
- *   1. Choice phase  — show choice cards. Clicking a choice that needs a
- *                      chef switches into the chef-pick sub-phase for that
- *                      choice.
- *   2. Outcome phase — sim.middayOutcome is set. Show the outcome panel +
- *                      Continue button that calls sim.dismissMiddayOutcome.
+ * Two phases per event:
+ *   1. Choice phase  — show choice cards. A choice that needs a chef switches
+ *                      into the chef-pick sub-phase for that choice.
+ *   2. Outcome phase — outcome panel + Continue button.
  *
- * The modal is `isModal: true` so the backdrop blocks game input.
+ * Source-of-truth fields:
+ *   - midday flow:  sim.middayEvent / sim.middayOutcome
+ *   - dayEnd flow:  sim.currentEvent / sim.eventOutcome
+ *
+ * On Continue:
+ *   - midday: sim.dismissMiddayOutcome() restores the prior dayState
+ *   - dayEnd: we record the event id as "dismissed" so autoOpenWhen returns
+ *             false; the player keeps eventOutcome (read by Start Day + the
+ *             Review tab's log) until startNextDay clears it.
  * ========================================================================== */
 
 class MiddayEventApp extends App {
   constructor() {
-    super({ id: 'midday_event', icon: '⚡', title: 'Midday', isModal: true });
+    super({ id: 'midday_event', icon: '⚡', title: 'Event', isModal: true });
     this._pendingChoiceIdx = null;     // choice the user clicked into for chef pick
+    // After the user clicks Continue on a dayEnd-event outcome, we stash the
+    // event id here so autoOpenWhen stops re-opening for the *same* event.
+    // startNextDay rolls a new currentEvent with a different id, so the next
+    // day's event will trigger a fresh open.
+    this._dismissedDayEndId = null;
+    // True while the user is currently viewing the outcome panel in THIS
+    // session. Set when a choice is resolved via this app; cleared on
+    // Continue. Lets autoOpenWhen keep the modal up for the outcome panel
+    // without re-opening on a save reload (where eventOutcome may already
+    // be set but the player has no "in-flow" reason to see it again).
+    this._showingDayEndOutcome = false;
   }
 
-  // Slightly wider than the default panel so 2-3 cards lay out well.
   panelRect() {
     if (!this.scene) return null;
     const W = this.scene.gameWidth || 1100;
@@ -37,11 +54,37 @@ class MiddayEventApp extends App {
   }
 
   autoOpenWhen(sim) {
-    return !!(sim && sim.middayEvent);
+    if (!sim) return false;
+    if (sim.middayEvent) return true;
+    if (sim.dayState === 'dayEnd') {
+      // Lazily roll the boot gift on Day 1 so the modal can show it.
+      if (typeof sim.ensureBootEvent === 'function') sim.ensureBootEvent();
+      if (!sim.currentEvent) return false;
+      if (this._dismissedDayEndId === sim.currentEvent.id) return false;
+      // Event already resolved AND we aren't actively showing the outcome
+      // panel in this session — likely a save reload. Don't pop the modal
+      // back open; the player can browse to Review for the log.
+      if (sim.eventOutcome && !this._showingDayEndOutcome) return false;
+      return true;
+    }
+    return false;
   }
 
   onClose() {
     this._pendingChoiceIdx = null;
+  }
+
+  /* Read the active event + outcome based on flow. Midday takes priority
+   * when both are set (it's the live pause). */
+  _activeEvent(sim) {
+    if (sim.middayEvent) return { ev: sim.middayEvent, flow: 'midday' };
+    if (sim.dayState === 'dayEnd' && sim.currentEvent) return { ev: sim.currentEvent, flow: 'dayEnd' };
+    return { ev: null, flow: null };
+  }
+  _activeOutcome(sim, flow) {
+    if (flow === 'midday') return sim.middayOutcome || null;
+    if (flow === 'dayEnd') return sim.eventOutcome || null;
+    return null;
   }
 
   update(sim) {
@@ -49,36 +92,39 @@ class MiddayEventApp extends App {
     const { used, usedZones, g, dg, r } = f;
     this._drawPanelFrame(g, dg, r, used, usedZones, { closeX: false });
 
-    const ev = sim.middayEvent;
+    const { ev, flow } = this._activeEvent(sim);
     if (!ev) { this._endFrame(used, usedZones); return; }
 
-    // Header
-    this._t(used, 'mt', `${ev.icon || '⚡'}  ${ev.title}`, r.x + 18, r.y + 14, {
-      font: 'bold 20px system-ui', color: '#ffd84d',
-    });
+    // Header: prefix with "End of Day N —" so the dayEnd context reads
+    // distinctly from a mid-service midday event.
+    const isGift = (ev.kind === 'gift');
+    const headerPrefix = flow === 'dayEnd'
+      ? (isGift ? '' : `End of Day ${sim.day} — `)
+      : (flow === 'midday' ? 'Midday — ' : '');
+    this._t(used, 'mt', `${ev.icon || '⚡'}  ${headerPrefix}${ev.title}`,
+      r.x + 18, r.y + 14, { font: 'bold 20px system-ui', color: '#ffd84d' });
     this._t(used, 'mf', ev.flavor || '', r.x + 18, r.y + 42, {
       font: 'italic 12px system-ui', color: '#d8d0e8',
       wordWrap: { width: r.w - 36 },
     });
 
-    // If an outcome is set, render the outcome panel + Continue.
-    if (sim.middayOutcome) {
-      this._renderOutcome(sim, r, used, usedZones, dg);
+    const outcome = this._activeOutcome(sim, flow);
+    if (outcome) {
+      this._renderOutcome(sim, flow, outcome, r, used, usedZones, dg);
     } else if (this._pendingChoiceIdx != null) {
-      this._renderChefPick(sim, ev, r, used, usedZones, dg);
+      this._renderChefPick(sim, ev, flow, r, used, usedZones, dg);
     } else {
-      this._renderChoices(sim, ev, r, used, usedZones, dg);
+      this._renderChoices(sim, ev, flow, r, used, usedZones, dg);
     }
 
     this._endFrame(used, usedZones);
   }
 
   /* ---- Phase 1: choice cards ----------------------------------------------- */
-  _renderChoices(sim, ev, r, used, usedZones, dg) {
+  _renderChoices(sim, ev, flow, r, used, usedZones, dg) {
     const choices = ev.choices || [];
     const cardsTop = r.y + 80;
     const cols = choices.length <= 2 ? choices.length : Math.min(2, choices.length);
-    const rows = Math.ceil(choices.length / cols);
     const colGap = 12, rowGap = 12;
     const cardW = (r.w - 36 - colGap * (cols - 1)) / Math.max(1, cols);
     const cardH = 130;
@@ -95,7 +141,6 @@ class MiddayEventApp extends App {
           dg.strokeRoundedRect(cx, cy, cardW, cardH, 8);
         }
         const labelColor = affordable ? '#ffffff' : '#6a5a8a';
-        // Kind tag
         const kindTag = this._kindBadge(choice);
         this._t(used, `mc:${choice.label}:kind`, kindTag, cx + 10, cy + 10, {
           font: 'bold 10px system-ui', color: '#ffd84d',
@@ -116,7 +161,7 @@ class MiddayEventApp extends App {
             if (needsChef) {
               this._pendingChoiceIdx = idx;
             } else {
-              sim.resolveMiddayChoice(idx);
+              this._resolve(sim, flow, idx, null);
             }
           }, usedZones);
         }
@@ -124,7 +169,7 @@ class MiddayEventApp extends App {
   }
 
   /* ---- Phase 1b: chef-pick sub-screen ------------------------------------- */
-  _renderChefPick(sim, ev, r, used, usedZones, dg) {
+  _renderChefPick(sim, ev, flow, r, used, usedZones, dg) {
     const choice = (ev.choices || [])[this._pendingChoiceIdx];
     if (!choice) { this._pendingChoiceIdx = null; return; }
     this._t(used, 'cp:lead', `Choose a chef for: ${choice.label}`,
@@ -135,9 +180,16 @@ class MiddayEventApp extends App {
       this._t(used, 'cp:dc', `Check ${slLabel} · DC ${dc}  (1d10 + stat)`,
         r.x + 18, r.y + 104, { font: 'bold 11px system-ui', color: '#9be8ff' });
     }
-    const chefs = (typeof sim.eligibleChefsForMidday === 'function')
-      ? sim.eligibleChefsForMidday(choice.stat)
-      : sim.employees.filter(e => e.isStarter || (e.isAvailable && e.isAvailable()));
+    // Use the dayEnd-eligible pool when in that flow; midday uses the
+    // slightly more permissive midday-pool. Both currently include
+    // starters + non-busy chefs.
+    const chefs = flow === 'dayEnd'
+      ? ((typeof sim.eligibleChefsForEvent === 'function')
+          ? sim.eligibleChefsForEvent()
+          : sim.employees.filter(e => e.isStarter || (e.isAvailable && e.isAvailable())))
+      : ((typeof sim.eligibleChefsForMidday === 'function')
+          ? sim.eligibleChefsForMidday(choice.stat)
+          : sim.employees.filter(e => e.isStarter || (e.isAvailable && e.isAvailable())));
     const chipW = 150, chipH = 32;
     const chipsPerRow = Math.max(1, Math.floor((r.w - 36) / (chipW + 8)));
     chefs.slice(0, 12).forEach((chef, i) => {
@@ -155,14 +207,12 @@ class MiddayEventApp extends App {
       this._t(used, `cp:${chef.id}`, tag, cx + 10, cy + 8, {
         font: 'bold 11px system-ui', color: '#ffffff',
       });
-      this._bindZone(`cp:${chef.id}`, cx, cy, chipW, chipH,
-        () => {
-          const idx = this._pendingChoiceIdx;
-          this._pendingChoiceIdx = null;
-          sim.resolveMiddayChoice(idx, chef.id);
-        }, usedZones);
+      this._bindZone(`cp:${chef.id}`, cx, cy, chipW, chipH, () => {
+        const idx = this._pendingChoiceIdx;
+        this._pendingChoiceIdx = null;
+        this._resolve(sim, flow, idx, chef.id);
+      }, usedZones);
     });
-    // Back button to return to choice list.
     const bw = 80, bh = 28;
     this._drawPanelButton('back', r.x + 18, r.y + r.h - 50, bw, bh, {
       label: '← Back', fill: 0x4a3d7a, color: '#ffffff',
@@ -171,8 +221,7 @@ class MiddayEventApp extends App {
   }
 
   /* ---- Phase 2: outcome ---------------------------------------------------- */
-  _renderOutcome(sim, r, used, usedZones, dg) {
-    const o = sim.middayOutcome;
+  _renderOutcome(sim, flow, o, r, used, usedZones, dg) {
     const top = r.y + 80;
     const isRoll = (o.kind === 'roll' || o.kind === 'hybrid');
     const banner = isRoll
@@ -191,11 +240,35 @@ class MiddayEventApp extends App {
       });
     }
     const bw = 160, bh = 38;
+    const label = (flow === 'dayEnd') ? '▶ Continue' : '▶ Continue';
     this._drawPanelButton('continue', r.x + r.w - bw - 18, r.y + r.h - bh - 18, bw, bh, {
-      label: '▶ Continue',
-      fill: 0x5fd97e, color: '#1a1428', centerLabel: true,
-      onClick: () => sim.dismissMiddayOutcome(),
+      label, fill: 0x5fd97e, color: '#1a1428', centerLabel: true,
+      onClick: () => {
+        if (flow === 'midday') {
+          sim.dismissMiddayOutcome();
+        } else if (flow === 'dayEnd') {
+          // Stash the event id so autoOpenWhen stops triggering for THIS
+          // event. Outcome remains on sim.eventOutcome (Start Day reads it,
+          // and Review's log will too).
+          this._dismissedDayEndId = sim.currentEvent ? sim.currentEvent.id : null;
+          this._showingDayEndOutcome = false;
+          if (this.manager) this.manager.close();
+        }
+      },
     }, used, usedZones);
+  }
+
+  // Dispatch a choice resolution to the right resolver for the current flow.
+  // For dayEnd, mark _showingDayEndOutcome so the next-frame autoOpenWhen
+  // keeps the modal up to render the outcome panel (this is the "in-flow"
+  // signal that distinguishes a live resolution from a save reload).
+  _resolve(sim, flow, choiceIdx, chefId) {
+    if (flow === 'midday') {
+      sim.resolveMiddayChoice(choiceIdx, chefId);
+    } else if (flow === 'dayEnd') {
+      const out = sim.resolveDayEndChoice(choiceIdx, chefId);
+      if (out && !out.error) this._showingDayEndOutcome = true;
+    }
   }
 
   /* ---- Helpers ------------------------------------------------------------- */
@@ -225,14 +298,18 @@ class MiddayEventApp extends App {
       const slLabel = choice.statLabel || (choice.stat || '').toUpperCase();
       parts.push(`Roll ${slLabel} ≥ ${dc}`);
     }
+    if (choice.description) parts.push(choice.description);
     return parts.length ? parts.join(' · ') : 'Click to apply';
   }
 
   describe(sim) {
+    const { ev, flow } = this._activeEvent(sim || {});
     return Object.assign(super.describe(), {
-      middayEventId: sim && sim.middayEvent ? sim.middayEvent.id : null,
-      hasOutcome:    sim ? !!sim.middayOutcome : null,
+      flow,
+      eventId:       ev ? ev.id : null,
+      hasOutcome:    !!this._activeOutcome(sim || {}, flow),
       pendingChoice: this._pendingChoiceIdx,
+      dismissedDayEndId: this._dismissedDayEndId,
     });
   }
 }

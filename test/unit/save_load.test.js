@@ -82,7 +82,11 @@ test('after load, sim continues to tick without throwing', () => {
   // Resolve the event with whatever chef is eligible, then start next day.
   const chef = sim2.eligibleChefsForEvent()[0];
   assert.ok(chef, 'should have an eligible chef to assign');
-  sim2.resolveEvent(chef.id);
+  // Resolve via the first roll choice in the unified-format dayEnd event.
+  const rollIdx = (sim2.currentEvent.choices || [])
+    .findIndex(c => c.kind === 'roll' || c.kind === 'hybrid');
+  assert.ok(rollIdx >= 0, 'dayEnd event should expose a roll choice');
+  sim2.resolveDayEndChoice(rollIdx, chef.id);
   sim2.startNextDay();
   assert.equal(sim2.dayState, 'spawning');
   // Tick a bit; must not throw, must continue producing customers.

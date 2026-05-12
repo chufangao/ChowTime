@@ -1,11 +1,25 @@
 /* ============================================================================
- * sim/event_manager.js — dayEnd event + boot-gift flow
+ * sim/event_manager.js — unified event flow (dayEnd, midday, boot gift)
  * ============================================================================
- * Extracted from Simulation. Owns no state of its own: all reads/writes go to
- * the parent sim's fields (currentEvent, eventAssignedChef, eventOutcome,
- * nextForecast, _bootEventDone). Simulation delegates four public methods to
- * this collaborator while keeping the same external signature, so callers
- * (UI apps, save/load, tests) don't need to know the split exists.
+ * Owns no state of its own: all reads/writes go to the parent sim. Three flows
+ * all funnel through the same `_applyChoice` helper so the data shape stays
+ * uniform across surfaces:
+ *
+ *   - dayEnd event: rolled in DayStateMachine on entering 'dayEnd'. Stored in
+ *     sim.currentEvent. Resolved via resolveDayEndChoice(idx, chefId?) which
+ *     writes to sim.eventOutcome. The MiddayEventApp renders the modal — see
+ *     its autoOpenWhen for the trigger.
+ *
+ *   - boot gift: a special dayEnd event (kind:'gift') rolled lazily on first
+ *     inspection. Same code path as above; the choices are `kind:'pay'` with
+ *     `cost: {}` and an onResolve that calls the gift's apply(sim).
+ *
+ *   - midday event: fires mid-service via maybeStartMiddayEvent. Stored in
+ *     sim.middayEvent. Resolved via resolveMiddayChoice; the dismiss step
+ *     restores the prior dayState so service can resume.
+ *
+ * Every resolution appends to sim.eventHistory (see _logHistoryEntry below).
+ * The history is what the Review tab reads to render the per-day log.
  * ========================================================================== */
 
 class EventManager {
@@ -26,61 +40,36 @@ class EventManager {
     }
   }
 
-  // Boot gift: player picks one starting boon. Sets eventOutcome so Start
-  // Day unlocks. Only valid while currentEvent is the gift event.
-  acceptGift(giftId) {
+  // Player picks a choice on the day-end event (regular or boot gift).
+  // Writes the outcome to sim.eventOutcome so the Start Day gate unlocks.
+  resolveDayEndChoice(choiceIdx, chefId) {
     const sim = this.sim;
-    if (sim.dayState !== 'dayEnd') return null;
-    this.ensureBootEvent();
-    if (!sim.currentEvent || sim.currentEvent.kind !== 'gift') return null;
-    if (sim.eventOutcome) return null;
-    const gift = (sim.currentEvent.options || []).find(o => o.id === giftId);
-    if (!gift) return null;
-    const result = (typeof gift.apply === 'function' ? gift.apply(sim) : null) || {};
-    result.giftId = gift.id;
-    sim.eventOutcome = {
-      passed: true, roll: 0, total: 0, dc: 0,
-      chef: null, result, msg: result.msg || gift.label,
-    };
-    return sim.eventOutcome;
+    if (sim.dayState !== 'dayEnd' || !sim.currentEvent || sim.eventOutcome) return null;
+    const ev = sim.currentEvent;
+    const choice = (ev.choices || [])[choiceIdx];
+    if (!choice) return null;
+    const result = this._applyChoice(ev, choice, chefId);
+    if (result && result.error) return result;
+    const out = this._toOutcome(choiceIdx, choice, result);
+    // Default chef status side-effect for day-end events: busy 1 day if a
+    // chef rolled and the choice didn't override status. Keeps quotas /
+    // scheduling tuned — playing through an event costs you that chef
+    // tomorrow. Starter chefs shrug off plain 'busy'.
+    if (out.chef && (choice.kind === 'roll' || choice.kind === 'hybrid' || choice.kind === 'ability')
+        && !(result && result.statusOverride)) {
+      let nextStatus = { kind: 'busy', daysLeft: 1 };
+      if (out.chef.isStarter) nextStatus = null;
+      if (nextStatus !== null) out.chef.status = nextStatus;
+    }
+    sim.eventOutcome = out;
+    this._logHistoryEntry({ when: 'dayEnd', event: ev, choice, outcome: out });
+    return out;
   }
 
   // List of chefs the player can assign to today's event. Starter chefs are
   // always shown; others must be currently available (not recovering).
   eligibleChefsForEvent() {
     return this.sim.employees.filter(e => e.isStarter || e.isAvailable());
-  }
-
-  // Roll the event for an assigned chef and apply its immediate effects
-  // (money delta, status). Forecast profile is stashed and applied at
-  // startNextDay(). Safe to call only while in 'dayEnd'. Returns outcome
-  // summary for the UI.
-  resolveEvent(chefId) {
-    const sim = this.sim;
-    if (sim.dayState !== 'dayEnd' || !sim.currentEvent || sim.eventOutcome) return null;
-    const chef = sim.employees.find(e => e.id === chefId);
-    if (!chef) return null;
-    const ev    = sim.currentEvent;
-    const dc    = typeof ev.dc === 'function' ? ev.dc(sim.day) : (ev.dc || 10);
-    const roll  = Math.floor(Math.random() * 10) + 1;     // 1..10
-    const total = roll + chef.effStat(ev.stat);
-    const passed = total >= dc;
-    const result = passed ? ev.onPass(sim, chef) : ev.onFail(sim, chef);
-
-    // Default chef status: busy for 1 day (skip tomorrow). Events can override
-    // via statusOverride (e.g. 'starstruck'). Starter chefs shrug off any
-    // disabling status but still accept positive ones.
-    let nextStatus = result.statusOverride || { kind: 'busy', daysLeft: 1 };
-    if (chef.isStarter && nextStatus.kind !== 'starstruck') nextStatus = null;
-    chef.status = nextStatus;
-
-    sim.eventAssignedChef = chef;
-    sim.eventOutcome = {
-      passed, roll, total, dc,
-      chef, result,
-      msg: result.msg || (passed ? 'Success.' : 'Failed.'),
-    };
-    return sim.eventOutcome;
   }
 
   /* ------------------------------------------------------------------------
@@ -103,9 +92,6 @@ class EventManager {
     if (sim.gameOver) return false;
     if (typeof rollMiddayEvent !== 'function') return false;
 
-    // Pick a per-day trigger threshold the first time we tick into a fresh
-    // day (DayStateMachine resets middayEventTriggerAt to null at startNextDay).
-    // We lazily roll it here so we don't depend on DayStateMachine to call us.
     if (sim.middayEventTriggerAt == null) {
       const quota = Math.max(1, sim.dayQuota || 1);
       const lo = Math.max(1, Math.ceil(quota * 0.3));
@@ -123,10 +109,6 @@ class EventManager {
     return true;
   }
 
-  // Pick a midday event, excluding any whose id appears in
-  // sim._recentMiddayEvents so the player doesn't see the same one twice in
-  // a row. We keep the recent window short (≤ half the catalog) so most
-  // events stay eligible.
   _pickMiddayEvent() {
     const sim = this.sim;
     if (typeof MIDDAY_EVENTS === 'undefined' || !MIDDAY_EVENTS.length) return null;
@@ -134,8 +116,6 @@ class EventManager {
     const eligible = MIDDAY_EVENTS.filter(e => recent.indexOf(e.id) < 0);
     const pool = eligible.length ? eligible : MIDDAY_EVENTS;
     const ev = pool[Math.floor(Math.random() * pool.length)];
-    // Remember this one. Cap the window at half the catalog so eligibility
-    // keeps churning instead of locking us into a shrinking pool.
     const cap = Math.max(1, Math.floor(MIDDAY_EVENTS.length / 2));
     recent.push(ev.id);
     while (recent.length > cap) recent.shift();
@@ -154,32 +134,51 @@ class EventManager {
     return eventDef;
   }
 
-  // Chef pool for a midday choice. Currently the same as eligibleChefsForEvent
-  // (starter chefs plus any non-busy chef). Kept as its own method so the
-  // 'busy' suppression rule can diverge later without touching DayEndApp.
   eligibleChefsForMidday(_stat) {
     return this.sim.employees.filter(e => e.isStarter || e.isAvailable());
   }
 
-  // Player picks a choice (and optionally a chef for roll/ability/hybrid).
-  // Applies the chosen branch's effects to sim and stores middayOutcome so
-  // the modal can render the result. Returns the outcome.
   resolveMiddayChoice(choiceIdx, chefId) {
     const sim = this.sim;
     if (sim.dayState !== 'midday_event' || !sim.middayEvent || sim.middayOutcome) return null;
     const ev = sim.middayEvent;
     const choice = (ev.choices || [])[choiceIdx];
     if (!choice) return null;
+    const result = this._applyChoice(ev, choice, chefId);
+    if (result && result.error) return result;
+    const out = this._toOutcome(choiceIdx, choice, result);
+    sim.middayOutcome = out;
+    this._logHistoryEntry({ when: 'midday', event: ev, choice, outcome: out });
+    return out;
+  }
 
-    // Cost (pay/hybrid) is checked before anything resolves so a failed pay
-    // doesn't half-apply effects. Negative cost == grant.
+  dismissMiddayOutcome() {
+    const sim = this.sim;
+    if (sim.dayState !== 'midday_event' || !sim.middayOutcome) return false;
+    sim.dayState      = sim.preMiddayState || 'spawning';
+    sim.preMiddayState = null;
+    sim.middayEvent   = null;
+    sim.middayOutcome = null;
+    return true;
+  }
+
+  /* ------------------------------------------------------------------------
+   * Shared helpers
+   * ---------------------------------------------------------------------- */
+
+  // Apply cost, resolve roll/ability/hybrid, return a result envelope with
+  // { passed, roll, total, dc, chef, result } — or { error } if a guard
+  // failed (no money, no chef, etc). Caller wraps it into the appropriate
+  // outcome field (eventOutcome vs middayOutcome) and applies any status
+  // side-effects.
+  _applyChoice(ev, choice, chefId) {
+    const sim = this.sim;
     const cost = choice.cost || {};
     const moneyCost = cost.money || 0;
     const repCost   = cost.reputation || 0;
     if (moneyCost > 0 && !sim.debug && sim.money < moneyCost) return { error: 'no-money', cost };
     if (repCost   > 0 && !sim.debug && sim.reputation < repCost) return { error: 'no-reputation', cost };
 
-    // Resolve roll/ability before applying anything: a chef may be required.
     const needsChef = (choice.kind === 'roll' || choice.kind === 'ability' || choice.kind === 'hybrid');
     let chef = null;
     if (needsChef) {
@@ -187,7 +186,6 @@ class EventManager {
       if (!chef) return { error: 'no-chef' };
     }
 
-    // Apply cost / grant.
     if (moneyCost) sim.money = Math.max(0, sim.money - moneyCost);
     if (repCost > 0) sim.reputation = Math.max(0, sim.reputation - repCost);
     if (repCost < 0) sim.reputation = Math.min(sim.reputationMax, sim.reputation - repCost);
@@ -226,25 +224,45 @@ class EventManager {
       }
     }
 
-    sim.middayOutcome = {
-      choiceIdx, kind: choice.kind,
-      passed, roll, total, dc,
-      chef: chef || null, result,
-      msg: result.msg || (passed ? 'Success.' : 'Failed.'),
-    };
-    return sim.middayOutcome;
+    return { passed, roll, total, dc, chef, result };
   }
 
-  // Player clicks "Continue" on the outcome panel. Restores the prior
-  // dayState so service resumes; clears midday state.
-  dismissMiddayOutcome() {
+  _toOutcome(choiceIdx, choice, applied) {
+    return {
+      choiceIdx, kind: choice.kind,
+      passed: applied.passed, roll: applied.roll, total: applied.total, dc: applied.dc,
+      chef: applied.chef || null,
+      result: applied.result,
+      msg: (applied.result && applied.result.msg)
+        ? applied.result.msg
+        : (applied.passed ? 'Success.' : 'Failed.'),
+    };
+  }
+
+  // Append one entry per resolution. The Review tab renders these. Kept
+  // small (no live chef ref — store name + id) so the log survives save/load
+  // round-trips and so a deleted chef doesn't keep a stale reference.
+  _logHistoryEntry({ when, event, choice, outcome }) {
     const sim = this.sim;
-    if (sim.dayState !== 'midday_event' || !sim.middayOutcome) return false;
-    sim.dayState      = sim.preMiddayState || 'spawning';
-    sim.preMiddayState = null;
-    sim.middayEvent   = null;
-    sim.middayOutcome = null;
-    return true;
+    if (!Array.isArray(sim.eventHistory)) sim.eventHistory = [];
+    const isRoll = (outcome.kind === 'roll' || outcome.kind === 'hybrid');
+    sim.eventHistory.push({
+      day:        sim.day,
+      when,                              // 'dayEnd' | 'midday'
+      eventId:    event.id,
+      eventIcon:  event.icon || '',
+      eventTitle: event.title || event.id || 'Event',
+      kind:       outcome.kind,
+      choiceLabel: choice.label || '',
+      chefId:     outcome.chef ? outcome.chef.id : null,
+      chefName:   outcome.chef ? outcome.chef.name : null,
+      passed:     !!outcome.passed,
+      isRoll,
+      roll:       outcome.roll || 0,
+      total:      outcome.total || 0,
+      dc:         outcome.dc || 0,
+      msg:        outcome.msg || '',
+    });
   }
 }
 

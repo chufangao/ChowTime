@@ -66,7 +66,6 @@ class Simulation {
     // — see ensureBootEvent — so headless tests that bypass the UI don't
     // burn host RNG.
     this.currentEvent     = null;
-    this.eventAssignedChef = null;
     this.eventOutcome     = null;        // {passed, roll, chef, result}
     this.nextForecast     = null;
 
@@ -98,6 +97,12 @@ class Simulation {
     // next frame after Begin Run, because day===1, currentEvent===null,
     // eventOutcome===null all transiently re-line up.
     this._bootEventDone   = false;
+
+    // Per-run event history. One entry per resolution (dayEnd or midday).
+    // The Review tab reads this for its log; it survives save/load. Entries
+    // store chef name+id rather than a live ref so a deleted chef doesn't
+    // dangle. See EventManager._logHistoryEntry for the entry shape.
+    this.eventHistory = [];
 
     // Popup queue for real-time ability floaters. Each entry is aged in
     // update() and rendered by Sprites.popups. Unique ids prevent text-pool
@@ -383,8 +388,7 @@ class Simulation {
   startNextDay()            { return this.dayStateMachine.startNextDay(); }
   _computeDayQuota(day)     { return this.dayStateMachine._computeDayQuota(day); }
   ensureBootEvent()         { return this.eventManager.ensureBootEvent(); }
-  acceptGift(giftId)        { return this.eventManager.acceptGift(giftId); }
-  resolveEvent(chefId)      { return this.eventManager.resolveEvent(chefId); }
+  resolveDayEndChoice(choiceIdx, chefId) { return this.eventManager.resolveDayEndChoice(choiceIdx, chefId); }
   eligibleChefsForEvent()   { return this.eventManager.eligibleChefsForEvent(); }
   resolveMiddayChoice(choiceIdx, chefId) { return this.eventManager.resolveMiddayChoice(choiceIdx, chefId); }
   dismissMiddayOutcome()    { return this.eventManager.dismissMiddayOutcome(); }

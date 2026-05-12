@@ -82,11 +82,11 @@ class DayStateMachine {
             sim.reputation + (CONFIG.reputationDailyBonus || 0));
         }
         sim.dayState = 'dayEnd';
-        // Roll today's event + tomorrow's baseline forecast. The modal
-        // reads these; resolveEvent + startNextDay consume them.
+        // Roll today's event + tomorrow's baseline forecast. The unified
+        // event modal reads these; resolveDayEndChoice + startNextDay
+        // consume them.
         sim.currentEvent  = rollDailyEvent(sim.day);
         sim.nextForecast  = rollBaseForecast();
-        sim.eventAssignedChef = null;
         sim.eventOutcome  = null;
       }
     }
@@ -138,7 +138,6 @@ class DayStateMachine {
     }
 
     sim.currentEvent      = null;
-    sim.eventAssignedChef = null;
     sim.eventOutcome      = null;
     sim.nextForecast      = null;
   }

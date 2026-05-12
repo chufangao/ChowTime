@@ -62,7 +62,8 @@ class Employee extends Entity {
   }
 
   // A chef is unavailable for the day when recovering from an event. Starter
-  // chefs never pick up this flag (see sim.resolveEvent).
+  // chefs never pick up this flag (see EventManager._applyChoice — the
+  // post-resolution status branch immunes them from 'busy').
   isAvailable() { return !this.status || this.status.kind !== 'busy'; }
 
   // Returns the stat scaled by the tired multiplier. STR is the one stat that

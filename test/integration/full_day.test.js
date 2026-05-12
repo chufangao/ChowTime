@@ -121,7 +121,11 @@ test('event resolution applies status to assigned chef', () => {
   assert.equal(sim.dayState, 'dayEnd');
 
   // Resolve the event with the non-starter — they should pick up some status.
-  sim.resolveEvent(newChef.id);
+  // Pick the first roll choice (every dayEnd event in EVENTS has one).
+  const rollIdx = (sim.currentEvent.choices || [])
+    .findIndex(c => c.kind === 'roll' || c.kind === 'hybrid');
+  assert.ok(rollIdx >= 0, 'event should expose a roll choice');
+  sim.resolveDayEndChoice(rollIdx, newChef.id);
   assert.ok(sim.eventOutcome, 'event must resolve');
   assert.ok(newChef.status, 'non-starter chef should pick up a status');
 });

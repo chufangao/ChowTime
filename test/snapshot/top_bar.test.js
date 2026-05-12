@@ -28,8 +28,10 @@ test('idle shell describe(): widgets present, no app open, all apps registered',
   const widgetIds = tb.widgets.map(w => w.id);
   assert.deepEqual(widgetIds, ['money', 'reputation', 'day', 'stats']);
   // Panel-app launchers should include the user-facing apps (game_over hides itself).
+  // midday_event is included because it has hasPanel:true even though its
+  // launcher button isn't user-clickable in normal flow (auto-opened only).
   const launcherIds = tb.panelApps.map(a => a.id).sort();
-  assert.deepEqual(launcherIds, ['build', 'day_end', 'hire', 'settings', 'start_day']);
+  assert.deepEqual(launcherIds, ['build', 'day_end', 'hire', 'midday_event', 'settings', 'start_day']);
   // Map tools: move, sell.
   const mapToolIds = tb.mapTools.map(a => a.id).sort();
   assert.deepEqual(mapToolIds, ['move', 'sell']);
@@ -58,18 +60,34 @@ test('toggling a map-tool sets activeMapToolId, not activeAppId-as-panel', () =>
   assert.ok(tb.panelApps.every(a => a.active === false));
 });
 
-test('day_end app auto-opens when sim transitions to dayState=dayEnd', () => {
+test('midday_event app auto-opens when an unresolved dayEnd event is pending', () => {
   const { mgr, sim } = bootShell();
-  // Skip the boot-gift roll by advancing past day 1, then force dayEnd.
+  // Skip the boot-gift roll by advancing past day 1, then force a dayEnd
+  // event into place. The unified modal (midday_event) auto-opens for
+  // any unresolved dayEnd event; the Review tab is on-demand only.
   sim.day = 2;
   sim.dayState = 'dayEnd';
-  sim.currentEvent = null;
   sim.eventOutcome = null;
+  sim.currentEvent = { id: 'test_ev', icon: '⚠', title: 'Test', flavor: '', choices: [
+    { kind: 'pay', label: 'Skip', cost: {}, onResolve: () => ({ msg: 'ok' }) },
+  ] };
   mgr.update(sim);
-  assert.equal(mgr.activeAppId, 'day_end');
+  assert.equal(mgr.activeAppId, 'midday_event');
 });
 
-test('game_over app preempts day_end (modal priority)', () => {
+test('no app auto-opens at dayEnd once the event is resolved', () => {
+  const { mgr, sim } = bootShell();
+  sim.day = 2;
+  sim.dayState = 'dayEnd';
+  // Event resolved — the modal stops auto-opening; Review stays on-demand.
+  sim.currentEvent = { id: 'test_ev', icon: '⚠', title: 'Test', flavor: '', choices: [] };
+  sim.eventOutcome = { passed: true, roll: 0, total: 0, dc: 0, chef: null, result: null, msg: 'ok' };
+  mgr.update(sim);
+  assert.notEqual(mgr.activeAppId, 'day_end');
+  assert.notEqual(mgr.activeAppId, 'midday_event');
+});
+
+test('game_over app preempts the event modal (modal priority)', () => {
   const { mgr, sim } = bootShell();
   sim.dayState = 'dayEnd';
   sim.gameOver = true;

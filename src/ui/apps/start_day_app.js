@@ -45,8 +45,8 @@ class StartDayApp extends App {
 
     const hint = ready
       ? (isBoot ? 'Ready to begin your run.' : 'Day is ready — best of luck.')
-      : (isBoot ? 'Pick a starting gift in 📅 Review first.'
-                : 'Resolve the day-end event in 📅 Review first.');
+      : (isBoot ? 'Pick a starting gift in the event popup first.'
+                : 'Resolve the day-end event in the popup first.');
     this._t(used, 'hint', hint, r.x + 18, r.y + 84, {
       font: '12px system-ui', color: ready ? '#c0b0e0' : '#ffb0b0',
       wordWrap: { width: r.w - 36 },

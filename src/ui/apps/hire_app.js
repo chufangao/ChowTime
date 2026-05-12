@@ -52,8 +52,12 @@ class HireApp extends App {
     // Header
     this._t(used, 'title', this.mode === 'list' ? '👤 Recruit a Cook' : '👤 Chef Profile',
       r.x + 18, r.y + 14, { font: 'bold 20px system-ui', color: '#ffd84d' });
-    this._t(used, 'cash', `Cash: $${sim ? sim.money : 0}`, r.x + r.w - 130, r.y + 18, {
-      font: 'bold 14px system-ui', color: '#ffd84d',
+    const freeCredits = (sim && sim._freeHireCredits) || 0;
+    const cashLabel = freeCredits > 0
+      ? `🎁 Next ${freeCredits === 1 ? 'hire' : `${freeCredits} hires`} FREE  ·  $${sim ? sim.money : 0}`
+      : `Cash: $${sim ? sim.money : 0}`;
+    this._t(used, 'cash', cashLabel, r.x + r.w - 280, r.y + 18, {
+      font: 'bold 14px system-ui', color: freeCredits > 0 ? '#7be68c' : '#ffd84d',
     });
 
     if (this.mode === 'list') this._renderList(sim, r, dg, used);
@@ -78,9 +82,13 @@ class HireApp extends App {
     }
 
     const window = pool.slice(startIdx, startIdx + cols * rows);
+    // Free-hire credit (from the 'free_hire' gift): every card is affordable
+    // and shows FREE in place of its cost while credits remain. Consumed by
+    // hireFromRoster on click.
+    const freeAvail = (sim && sim._freeHireCredits) > 0;
     this._drawCardGrid(window, { x: r.x + 18, y: gridY, cols, cardW, cardH, colGap: 16, rowGap: 8 },
       (entry, cx, cy) => {
-        const affordable = sim.debug || sim.money >= entry.cost;
+        const affordable = sim.debug || freeAvail || sim.money >= entry.cost;
         if (dg) {
           dg.fillStyle(0x000000, 0.25); dg.fillRoundedRect(cx + 2, cy + 3, cardW, cardH, 8);
           dg.fillStyle(affordable ? 0x3d2d5c : 0x2a2233, 1);
@@ -108,9 +116,11 @@ class HireApp extends App {
         this._t(used, `c:${entry.id}:abil`, abIcons, tx, cy + 50, {
           font: '14px system-ui', color: '#ffe680',
         });
-        this._t(used, `c:${entry.id}:cost`, `$${entry.cost}${affordable ? '' : ' ✗'}`,
+        const costLabel = freeAvail ? 'FREE' : `$${entry.cost}${affordable ? '' : ' ✗'}`;
+        const costColor = freeAvail ? '#7be68c' : (affordable ? '#ffd84d' : '#8888a0');
+        this._t(used, `c:${entry.id}:cost`, costLabel,
           cx + cardW - 60, cy + cardH - 22, {
-            font: 'bold 14px system-ui', color: affordable ? '#ffd84d' : '#8888a0',
+            font: 'bold 14px system-ui', color: costColor,
           });
         this._bindZone(`card:${entry.id}`, cx, cy, cardW, cardH, () => {
           this.selectedEntryId = entry.id;
@@ -176,7 +186,8 @@ class HireApp extends App {
     });
 
     // Hire + Back
-    const affordable = sim.debug || sim.money >= entry.cost;
+    const freeAvail  = (sim && sim._freeHireCredits) > 0;
+    const affordable = sim.debug || freeAvail || sim.money >= entry.cost;
     const flashing   = sim.time < this.noMoneyFlashUntil;
     this._drawPanelButton('back', r.x + 24, r.y + r.h - 56, 100, 36, {
       label: '← Back', font: 'bold 13px system-ui',
@@ -185,7 +196,7 @@ class HireApp extends App {
       onClick: () => { this.mode = 'list'; },
     }, used, this._usedZones);
     this._drawPanelButton('hire', r.x + r.w - 184, r.y + r.h - 56, 160, 36, {
-      label: affordable ? `Hire $${entry.cost}` : `Can't afford`,
+      label: !affordable ? `Can't afford` : (freeAvail ? `Hire (FREE)` : `Hire $${entry.cost}`),
       font: 'bold 14px system-ui',
       fill: !affordable ? 0x555566 : (flashing ? 0xc94a2a : 0x4a9e5c),
       radius: 6, shadow: false,

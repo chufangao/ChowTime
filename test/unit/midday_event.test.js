@@ -158,7 +158,7 @@ test('startNextDay resets the per-day midday trigger threshold', () => {
   sim.seedDemo();
   sim.middayEventTriggerAt = 999;
   sim.ensureBootEvent();
-  if (sim.currentEvent && sim.currentEvent.options) sim.acceptGift(sim.currentEvent.options[0].id);
+  if (sim.currentEvent && (sim.currentEvent.choices || []).length) sim.resolveDayEndChoice(0);
   sim.startNextDay();
   assert.equal(sim.middayEventTriggerAt, null);
 });
@@ -196,7 +196,7 @@ test('startNextDay re-arms the midday roll', () => {
   sim.middayEventRolledToday = true;
   // Drive the boot-gift flow so startNextDay is allowed.
   sim.ensureBootEvent();
-  if (sim.currentEvent && sim.currentEvent.options) sim.acceptGift(sim.currentEvent.options[0].id);
+  if (sim.currentEvent && (sim.currentEvent.choices || []).length) sim.resolveDayEndChoice(0);
   sim.startNextDay();
   assert.equal(sim.middayEventRolledToday, false);
 });

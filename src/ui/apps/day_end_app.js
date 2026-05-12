@@ -1,18 +1,16 @@
 /* ============================================================================
- * src/ui/apps/day_end_app.js — Single between-day surface
+ * src/ui/apps/day_end_app.js — Review tab: chef state + event log
  * ============================================================================
- * Auto-opens when sim.dayState === 'dayEnd'. Renders one of two layouts based
- * on sim.currentEvent.kind:
+ * Pure on-demand surface. The dayEnd event (and the Day-1 boot gift) used to
+ * resolve here; that flow now lives in MiddayEventApp, which auto-opens its
+ * unified modal during 'dayEnd'. This tab is purely informational:
  *
- *   - 'gift'  → Day 1 boot. Header + gift choice cards.
- *   - regular → Day N wrap-up. Day summary + chef report cards + stat-check
- *               chef chips + forecast.
+ *   - Top section: chef cards (name, base stats, today's perf, status badge)
+ *   - Bottom section: rolling event history log — one line per resolution
+ *     across both midday and dayEnd events. Lines are stored on sim.eventHistory
+ *     by EventManager._logHistoryEntry, persisted across save/load.
  *
- * The actual "Start Day" / "Begin Run" button lives in StartDayApp — split
- * out so the player can't hit it by accident while resolving the event.
- *
- * Closing this app while still in dayEnd is allowed; the player can re-open
- * via the 📅 Review launcher in the top bar.
+ * The launcher (📅 Review) opens this panel; nothing here forces auto-open.
  * ========================================================================== */
 
 class DayEndApp extends App {
@@ -20,31 +18,25 @@ class DayEndApp extends App {
     super({ id: 'day_end', icon: '📅', title: 'Review', isModal: false });
   }
 
-  /** Wider panel during boot/gift so the choice cards have breathing room. */
+  // Wider/taller than the default — chef cards have full portraits and the
+  // log can grow with the run.
   panelRect() {
     if (!this.scene) return null;
-    const sim = this.manager && this.manager._sim;
-    const isBoot = !!(sim && sim.currentEvent && sim.currentEvent.kind === 'gift');
-    if (!isBoot) return super.panelRect();
     const W = this.scene.gameWidth || 1100;
     const H = this.scene.gameHeight || 600;
-    const w = Math.min(720, Math.floor(W * 0.85));
-    const h = Math.min(520, Math.floor((H - this._topBarH()) * 0.85));
+    const w = Math.min(820, Math.floor(W * 0.86));
+    const h = Math.min(580, Math.floor((H - this._topBarH()) * 0.92));
     return this._centeredRect(w, h);
   }
 
-  /** Open while in dayEnd. The boot-gift flow rolls its event lazily so we
-   *  call ensureBootEvent here too — saves the player from a one-frame
-   *  flicker if they bounced into dayEnd before any other code touched it. */
-  autoOpenWhen(sim) {
-    if (!sim) return false;
-    if (sim.dayState !== 'dayEnd') return false;
-    if (typeof sim.ensureBootEvent === 'function') sim.ensureBootEvent();
-    return !this._userClosed;
-  }
+  // Always on-demand — the unified event modal handles all auto-opens now.
+  autoOpenWhen(_sim) { return false; }
 
-  onClose() { this._userClosed = true; }
-  onOpen()  { this._userClosed = false; }
+  // No persistent attention dot here either. The unified modal IS the call to
+  // action for unresolved events; lighting up Review on top of that would
+  // double-signal. (Past-day history is information the player browses to,
+  // not a notification.)
+  notification(_sim) { return false; }
 
   update(sim) {
     const f = this._beginFrame(); if (!f) return;
@@ -52,236 +44,147 @@ class DayEndApp extends App {
 
     this._drawPanelFrame(g, dg, r, used, usedZones, { closeIcon: '–' });
 
-    const ev = sim.currentEvent;
-    const isBoot = !!(ev && ev.kind === 'gift');
-
     // Header
-    const headerTitle = isBoot
-      ? `🎉 Welcome — Day 1 setup`
-      : `📅 Day ${sim.day} Wrap-Up`;
-    this._t(used, 'title', headerTitle, r.x + 18, r.y + 14, {
+    this._t(used, 'title', `📅 Review`, r.x + 18, r.y + 14, {
       font: 'bold 20px system-ui', color: '#ffd84d',
     });
-    if (isBoot) {
-      this._t(used, 'sum', `Pick your starting gift, then begin Day 1.`,
-        r.x + 18, r.y + 42, { font: '12px system-ui', color: '#c0b0e0' });
-    } else {
-      const earned = sim.money - sim.dayStartMoney;
-      const earnStr = earned >= 0 ? `+$${earned}` : `−$${-earned}`;
-      this._t(used, 'sum', `${earnStr}  ·  served ${sim.stats.served}  ·  angry ${sim.stats.angry}  ·  plates ${sim.stats.plates}  ·  tips $${sim.stats.tipsTotal}`,
-        r.x + 18, r.y + 42, { font: '12px system-ui', color: '#c0b0e0' });
-    }
+    const earned = sim.money - sim.dayStartMoney;
+    const earnStr = earned >= 0 ? `+$${earned}` : `−$${-earned}`;
+    const sub = sim.day > 1 && sim.dayState === 'dayEnd'
+      ? `Day ${sim.day} — ${earnStr}  ·  served ${sim.stats.served}  ·  angry ${sim.stats.angry}  ·  plates ${sim.stats.plates}  ·  tips $${sim.stats.tipsTotal}`
+      : `Day ${sim.day}`;
+    this._t(used, 'sub', sub, r.x + 18, r.y + 42, {
+      font: '12px system-ui', color: '#ffffff',
+    });
 
-    // Body: gift cards on boot, chef cards + stat-check chips otherwise.
+    // Chef cards take the top half; history fills the rest.
     let cy = r.y + 70;
-    if (isBoot) {
-      cy = this._renderGift(sim, ev, r, dg, used, usedZones, cy);
-    } else {
-      cy = this._renderChefCards(sim, r, dg, used, cy);
-      cy = this._renderEventRow(sim, ev, r, dg, used, usedZones, cy);
-    }
-
-    // Forecast line — Start Day button now lives in StartDayApp.
-    const fc = sim.nextForecast;
-    const fcLabel = (fc && fc.label) || 'Nothing unusual on the books';
-    this._t(used, 'fc', `🔮  Tomorrow:  ${fcLabel}`, r.x + 18, r.y + r.h - 50, {
-      font: 'bold 12px system-ui', color: '#9be8ff',
-    });
-    const canStart = !!sim.eventOutcome;
-    const footHint = canStart
-      ? (isBoot ? 'Open ▶️ Start Day to begin your run.' : 'Open ▶️ Start Day when you’re ready.')
-      : (isBoot ? 'Pick a gift to unlock ▶️ Start Day.' : 'Resolve the event to unlock ▶️ Start Day.');
-    this._t(used, 'fh', footHint, r.x + 18, r.y + r.h - 28, {
-      font: 'italic 11px system-ui', color: canStart ? '#7be68c' : '#ffb84d',
-    });
+    cy = this._renderChefCards(sim, r, dg, used, cy) + 8;
+    this._renderHistory(sim, r, dg, used, usedZones, cy);
 
     this._endFrame(used, usedZones);
   }
 
-  /** Red dot on the launcher whenever an unresolved dayEnd event is pending. */
-  notification(sim) {
-    if (!sim || sim.dayState !== 'dayEnd') return false;
-    return !sim.eventOutcome;
-  }
-
-  /* ---- Gift cards (boot/Day-1) ------------------------------------------- */
-  _renderGift(sim, ev, r, dg, used, usedZones, top) {
-    const opts = ev.options || [];
-    const cardsTop = top + 10;
-    const cardW = (r.w - 36 - 12 * (opts.length - 1)) / Math.max(1, opts.length);
-    const cardH = 150;
-    const locked = !!sim.eventOutcome;
-    const pickedId = locked && sim.eventOutcome.result && sim.eventOutcome.result.giftId;
-    this._drawCardGrid(opts,
-      { x: r.x + 18, y: cardsTop, cols: Math.max(1, opts.length), cardW, cardH, colGap: 12, rowGap: 0 },
-      (opt, cx, cy) => {
-        const isPicked = pickedId && pickedId === opt.id;
-        if (dg) {
-          dg.fillStyle(0x000000, 0.25); dg.fillRoundedRect(cx + 2, cy + 3, cardW, cardH, 8);
-          const fill = isPicked ? 0xffb84d : (locked ? 0x322a42 : 0x3d2d5c);
-          dg.fillStyle(fill, 1);
-          dg.fillRoundedRect(cx, cy, cardW, cardH, 8);
-          dg.lineStyle(isPicked ? 3 : 2, isPicked ? 0xffd84d : 0x2a1a1a, isPicked ? 1 : 0.6);
-          dg.strokeRoundedRect(cx, cy, cardW, cardH, 8);
-        }
-        const labelColor = isPicked ? '#1a1428' : (locked ? '#8888a0' : '#ffffff');
-        const descColor  = isPicked ? '#3a2233' : (locked ? '#7a6a90' : '#c0b0e0');
-        const icon = this._t(used, `gi:${opt.id}:icon`, opt.icon || '🎁',
-          cx + cardW / 2, cy + 16, { font: '40px system-ui', color: '#ffffff' });
-        if (icon && icon.setOrigin) icon.setOrigin(0.5, 0);
-        const label = this._t(used, `gi:${opt.id}:label`, opt.label || opt.id,
-          cx + cardW / 2, cy + 70, {
-            font: 'bold 14px system-ui', color: labelColor,
-          });
-        if (label && label.setOrigin) label.setOrigin(0.5, 0);
-        const desc = this._t(used, `gi:${opt.id}:desc`, opt.description || '',
-          cx + cardW / 2, cy + 96, {
-            font: '12px system-ui', color: descColor,
-            wordWrap: { width: cardW - 20 }, align: 'center',
-          });
-        if (desc && desc.setOrigin) desc.setOrigin(0.5, 0);
-        if (!locked) {
-          this._bindZone(`gi:${opt.id}`, cx, cy, cardW, cardH,
-            () => sim.acceptGift(opt.id), usedZones);
-        }
-      });
-
-    const outY = cardsTop + cardH + 14;
-    if (sim.eventOutcome) {
-      const o = sim.eventOutcome;
-      this._t(used, 'gi:out', `🎁  ${o.msg}`, r.x + 18, outY, {
-        font: 'bold 13px system-ui', color: '#7be68c',
-        wordWrap: { width: r.w - 36 },
-      });
-    } else {
-      this._t(used, 'gi:hint', 'Pick one — applies immediately.',
-        r.x + 18, outY, {
-          font: 'italic 12px system-ui', color: '#c0b0e0',
-        });
-    }
-    return outY + 28;
-  }
-
-  /* ---- Chef report cards (regular wrap-up) ------------------------------- */
+  /* ---- Chef state cards ---------------------------------------------------
+   * Card layout: portrait well on the left (Sprites.chefPortrait, same as
+   * the Hire app's recruit cards so the player sees the SAME face here as
+   * when they picked them), text column on the right (name, stats, today's
+   * perf line, optional status badge). */
   _renderChefCards(sim, r, dg, used, top) {
     const colW = (r.w - 36 - 12) / 2;
-    const cardH = 44;
+    const cardH = 88;
     const list = sim.employees.slice(0, 8);
     this._drawCardGrid(list,
-      { x: r.x + 18, y: top, cols: 2, cardW: colW, cardH, colGap: 12, rowGap: 6 },
+      { x: r.x + 18, y: top, cols: 2, cardW: colW, cardH, colGap: 12, rowGap: 8 },
       (e, cx, yy) => {
         const busy = e.status && e.status.kind === 'busy';
         if (dg) {
+          // Card frame.
+          dg.fillStyle(0x000000, 0.25);
+          dg.fillRoundedRect(cx + 2, yy + 3, colW, cardH, 8);
           dg.fillStyle(busy ? 0x2a2233 : 0x3d2d5c, 1);
-          dg.fillRoundedRect(cx, yy, colW, cardH, 6);
-          dg.lineStyle(2, 0x2a1a1a, 0.6); dg.strokeRoundedRect(cx, yy, colW, cardH, 6);
-          const v = e.visual || {};
-          const skin = v.skinColor != null ? v.skinColor : 0xfec9a7;
+          dg.fillRoundedRect(cx, yy, colW, cardH, 8);
+          dg.lineStyle(2, 0x2a1a1a, 0.6); dg.strokeRoundedRect(cx, yy, colW, cardH, 8);
+          // Portrait well — sized to fit a full chefPortrait (headR=18 head +
+          // toque ~20 above + shoulders ~14 below ≈ 64×72 visible).
           dg.fillStyle(0x231a30, 1);
-          dg.fillRoundedRect(cx + 4, yy + 4, 36, cardH - 8, 4);
-          dg.fillStyle(skin, 1);
-          dg.fillCircle(cx + 22, yy + cardH / 2, 11);
-          dg.lineStyle(1.2, 0x2a1a1a, 1);
-          dg.strokeCircle(cx + 22, yy + cardH / 2, 11);
-          if ((v.hat != null ? v.hat : 0) === 0) {
-            dg.fillStyle(0xffffff, 1);
-            dg.fillCircle(cx + 22, yy + cardH / 2 - 7, 5);
-            dg.lineStyle(1.2, 0x2a1a1a, 1);
-            dg.strokeCircle(cx + 22, yy + cardH / 2 - 7, 5);
-          } else if (v.hasHair) {
-            dg.fillStyle(v.hairColor != null ? v.hairColor : 0x3a2a1a, 1);
-            dg.fillCircle(cx + 22, yy + cardH / 2 - 3, 7);
+          dg.fillRoundedRect(cx + 6, yy + 6, 60, cardH - 12, 6);
+          dg.lineStyle(1.5, 0x2a1a1a, 0.5);
+          dg.strokeRoundedRect(cx + 6, yy + 6, 60, cardH - 12, 6);
+          // Real portrait — same renderer the Hire app uses, so the face
+          // here matches what the player saw on recruit.
+          if (typeof Sprites !== 'undefined' && Sprites.chefPortrait) {
+            // Center: cx + 36, yy + cardH/2 + 6 (slight bias down so the
+            // toque has room above the head).
+            Sprites.chefPortrait(dg, e, cx + 36, yy + cardH / 2 + 6);
           }
         }
+        const tx = cx + 76;
         const star = e.isStarter ? '★ ' : '';
-        this._t(used, `e:${e.id}:n`, `${star}${e.name}`, cx + 46, yy + 4, {
-          font: 'bold 12px system-ui', color: '#ffffff',
+        this._t(used, `e:${e.id}:n`, `${star}${e.name}`, tx, yy + 8, {
+          font: 'bold 13px system-ui', color: '#ffffff',
         });
         this._t(used, `e:${e.id}:s`,
           `D${e.dex} S${e.spd} T${e.str} I${e.int} C${e.cha}`,
-          cx + 46, yy + 22, { font: '10px monospace', color: '#c0b0e0' });
+          tx, yy + 30, { font: '11px monospace', color: '#ffffff' });
         const d = e.dayStats || { dishes: 0, tipsEarned: 0, timesTired: 0, procs: 0 };
         this._t(used, `e:${e.id}:d`,
-          `🍳${d.dishes} 💰$${d.tipsEarned} 😓${d.timesTired} ✨${d.procs}`,
-          cx + colW - 160, yy + 22, { font: '10px system-ui', color: '#ffd84d' });
+          `🍳${d.dishes}  💰$${d.tipsEarned}  😓${d.timesTired}  ✨${d.procs}`,
+          tx, yy + 52, { font: '11px system-ui', color: '#ffd84d' });
         let badge = '';
         if (e.status) {
           if (e.status.kind === 'busy')        badge = 'BUSY';
           else if (e.status.kind === 'stressed') badge = 'STRESSED';
           else if (e.status.kind === 'starstruck') badge = '★';
+          else if (e.status.kind === 'injured')  badge = 'INJURED';
         }
-        if (badge) this._t(used, `e:${e.id}:b`, badge, cx + colW - 56, yy + 4, {
+        if (badge) this._t(used, `e:${e.id}:b`, badge, cx + colW - 70, yy + 8, {
           font: 'bold 10px system-ui', color: '#ff7070',
         });
       });
-    return top + Math.ceil(Math.min(sim.employees.length, 8) / 2) * (cardH + 6) + 8;
+    const rows = Math.ceil(Math.min(sim.employees.length, 8) / 2);
+    return top + rows * (cardH + 8);
   }
 
-  /* ---- Event row + stat-check chips (regular wrap-up) -------------------- */
-  _renderEventRow(sim, ev, r, dg, used, usedZones, top) {
-    if (!ev) return top;
-    const tag = sim.eventOutcome ? '✓ Resolved' : '⚠ Pending';
-    const color = sim.eventOutcome ? '#7be68c' : '#ffb84d';
-    this._t(used, 'ev:status', `${ev.icon || '⚠️'}  ${ev.title}  ·  ${tag}`, r.x + 18, top, {
-      font: 'bold 13px system-ui', color,
-    });
-    this._t(used, 'ev:flavor', ev.flavor || '', r.x + 18, top + 18, {
-      font: 'italic 11px system-ui', color: '#d8d0e8',
-      wordWrap: { width: r.w - 40 },
+  /* ---- Event history log -------------------------------------------------- */
+  _renderHistory(sim, r, dg, used, usedZones, top) {
+    const h = (r.y + r.h) - top - 14;
+    if (h < 60) return;
+
+    // Section header.
+    this._t(used, 'hist:hdr', '📜 Event log', r.x + 18, top, {
+      font: 'bold 14px system-ui', color: '#ffd84d',
     });
 
-    const dc = typeof ev.dc === 'function' ? ev.dc(sim.day) : ev.dc;
-    this._t(used, 'sc:dc', `Check ${ev.statLabel || (ev.stat || '').toUpperCase()} · DC ${dc} (1d10 + stat)`,
-      r.x + 18, top + 40, { font: 'bold 11px system-ui', color: '#ffd84d' });
-
-    const chefs = (typeof sim.eligibleChefsForEvent === 'function' ? sim.eligibleChefsForEvent() : []) || [];
-    const chipW = 130, chipH = 26;
-    const chipsPerRow = Math.max(1, Math.floor((r.w - 36) / (chipW + 6)));
-    const chipsTop = top + 60;
-    const locked = !!sim.eventOutcome;
-    chefs.slice(0, 12).forEach((chef, i) => {
-      const col = i % chipsPerRow, row = (i / chipsPerRow) | 0;
-      const cx = r.x + 18 + col * (chipW + 6);
-      const cy = chipsTop + row * (chipH + 4);
-      const picked = sim.eventOutcome && sim.eventOutcome.chef === chef;
-      if (dg) {
-        if (picked) { dg.fillStyle(0xffd84d, 0.35); dg.fillRoundedRect(cx - 4, cy - 3, chipW + 8, chipH + 6, 8); }
-        const fill = picked ? 0x5fd97e : (locked ? 0x322a42 : 0x5a4ab0);
-        dg.fillStyle(fill, 1); dg.fillRoundedRect(cx, cy, chipW, chipH, 4);
-        dg.lineStyle(picked ? 3 : 2, picked ? 0xffd84d : 0x2a1a1a, picked ? 1 : 0.6);
-        dg.strokeRoundedRect(cx, cy, chipW, chipH, 4);
-      }
-      const sv = Math.round(chef.effStat ? chef.effStat(ev.stat) : 0);
-      const prefix = picked ? '✓ ' : '';
-      this._t(used, `sc:${chef.id}`, `${prefix}${(chef.name || '').split(' ')[0]} (${ev.statLabel || (ev.stat || '').toUpperCase()} ${sv})`,
-        cx + 8, cy + 6, {
-          font: 'bold 10px system-ui',
-          color: picked ? '#1a1428' : (locked ? '#8888a0' : '#ffffff'),
+    const entries = Array.isArray(sim.eventHistory) ? sim.eventHistory : [];
+    if (entries.length === 0) {
+      this._t(used, 'hist:empty', 'No events resolved yet — choices show up here.',
+        r.x + 18, top + 22, {
+          font: 'italic 11px system-ui', color: '#ffffff',
         });
-      if (!locked) this._bindZone(`sc:${chef.id}`, cx, cy, chipW, chipH,
-        () => sim.resolveEvent(chef.id), usedZones);
-    });
+      return;
+    }
 
-    const outY = chipsTop + Math.ceil(Math.max(1, chefs.length) / chipsPerRow) * (chipH + 4) + 8;
-    if (sim.eventOutcome) {
-      const o = sim.eventOutcome;
-      const otag = o.passed ? 'PASSED' : 'FAILED';
-      const stat = ev.stat ? Math.round((o.chef && o.chef.effStat) ? o.chef.effStat(ev.stat) : 0) : 0;
-      this._t(used, 'sc:out', `${otag} (roll ${o.roll}+${stat}=${Math.round(o.total)} vs ${o.dc}) ${o.msg}`,
-        r.x + 18, outY, {
-          font: 'bold 11px system-ui', color: o.passed ? '#7be68c' : '#ff7070',
-          wordWrap: { width: r.w - 40 },
+    // Newest first. Render as many one-liners as fit; scrollable variants can
+    // come later when the log grows past the panel.
+    const rows = [...entries].reverse();
+    const rowH = 18;
+    const maxRows = Math.max(0, Math.floor((h - 28) / rowH));
+    const visible = rows.slice(0, maxRows);
+    visible.forEach((e, i) => {
+      const y = top + 22 + i * rowH;
+      const line = this._formatHistoryLine(e);
+      const color = e.isRoll
+        ? (e.passed ? '#7be68c' : '#ff7070')
+        : '#ffffff';
+      this._t(used, `hist:${i}:line`, line, r.x + 18, y, {
+        font: '11px system-ui', color,
+        wordWrap: { width: r.w - 36 },
+      });
+    });
+    if (rows.length > visible.length) {
+      this._t(used, 'hist:more', `…and ${rows.length - visible.length} earlier.`,
+        r.x + 18, top + 22 + visible.length * rowH, {
+          font: 'italic 10px system-ui', color: '#c0b0e0',
         });
     }
-    return outY + 18;
+  }
+
+  // "Day 3 — 🥊 Brawl · Break it up · Maria · PASS (8+4=12 vs DC 10) — Grateful table tipped $50."
+  _formatHistoryLine(e) {
+    const head = `Day ${e.day} — ${e.eventIcon ? e.eventIcon + ' ' : ''}${e.eventTitle}`;
+    const choice = e.choiceLabel ? ` · ${e.choiceLabel}` : '';
+    const chef   = e.chefName ? ` · ${e.chefName}` : '';
+    const rollStr = e.isRoll
+      ? ` · ${e.passed ? 'PASS' : 'FAIL'} (${e.roll}+${Math.max(0, (e.total || 0) - (e.roll || 0))}=${e.total} vs DC ${e.dc})`
+      : '';
+    const msg = e.msg ? ` — ${e.msg}` : '';
+    return `${head}${choice}${chef}${rollStr}${msg}`;
   }
 
   describe(sim) {
-    const ev = sim && sim.currentEvent;
     return Object.assign(super.describe(), {
-      eventResolved: sim ? !!sim.eventOutcome : null,
-      eventId:       ev ? ev.id : null,
-      eventKind:     ev ? (ev.kind || 'event') : null,
+      historyLen: Array.isArray(sim && sim.eventHistory) ? sim.eventHistory.length : 0,
     });
   }
 }

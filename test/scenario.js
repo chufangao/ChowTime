@@ -24,14 +24,14 @@ function runScenario(sim, opts) {
     sim.eventManager.maybeStartMiddayEvent = () => false;
   }
 
-  // Boot state is dayEnd; advance into Day 1 by rolling and auto-accepting
-  // the gift (the UI does this via DayEndApp; tests skip the UI so we
-  // do it here once before driving the loop).
+  // Boot state is dayEnd; advance into Day 1 by rolling and auto-picking
+  // the first gift choice (the UI does this via the unified event modal;
+  // tests skip the UI so we do it here once before driving the loop).
   if (sim.dayState === 'dayEnd' && !sim.eventOutcome) {
     if (typeof sim.ensureBootEvent === 'function') sim.ensureBootEvent();
     if (sim.currentEvent && sim.currentEvent.kind === 'gift') {
-      const opts = sim.currentEvent.options || [];
-      if (opts.length) sim.acceptGift(opts[0].id);
+      const choices = sim.currentEvent.choices || [];
+      if (choices.length) sim.resolveDayEndChoice(0);
       if (sim.eventOutcome) sim.startNextDay();
     }
   }
@@ -80,10 +80,18 @@ function runScenario(sim, opts) {
 
     if (sim.dayState === 'dayEnd') {
       if (autoResolveEvents) {
-        // Pick the first eligible chef and click through the modal.
-        const eligible = sim.eligibleChefsForEvent();
-        if (eligible.length && !sim.eventOutcome) {
-          sim.resolveEvent(eligible[0].id);
+        // Click through the modal: find the first roll/hybrid choice and
+        // assign the first eligible chef. If none, fall back to the first
+        // pay choice. Matches what a player on autopilot would do.
+        if (!sim.eventOutcome && sim.currentEvent) {
+          const choices = sim.currentEvent.choices || [];
+          const rollIdx = choices.findIndex(c => c.kind === 'roll' || c.kind === 'hybrid');
+          if (rollIdx >= 0) {
+            const eligible = sim.eligibleChefsForEvent();
+            if (eligible.length) sim.resolveDayEndChoice(rollIdx, eligible[0].id);
+          } else if (choices.length) {
+            sim.resolveDayEndChoice(0);
+          }
         }
         if (sim.eventOutcome && sim.day < untilDay) {
           sim.startNextDay();
