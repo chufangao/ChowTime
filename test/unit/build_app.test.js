@@ -19,7 +19,7 @@ test('all default building items are registered', () => {
   const { mgr } = bootBuild();
   const ids = mgr.buildItems.map(i => i.id).sort();
   assert.deepEqual(norm(ids), [
-    'catapult_stove', 'chair', 'floor', 'player_wall', 'sink', 'stove', 'table',
+    'catapult_stove', 'chair', 'chef_spawn', 'floor', 'player_wall', 'sink', 'stove', 'table',
   ]);
 });
 
@@ -27,7 +27,7 @@ test('BuildApp.itemsInTab partitions kitchen / dining / structure correctly', ()
   const { build } = bootBuild();
   build.tab = 'kitchen';
   const k = build.itemsInTab().map(i => i.id).sort();
-  assert.deepEqual(norm(k), ['catapult_stove', 'sink', 'stove']);
+  assert.deepEqual(norm(k), ['catapult_stove', 'chef_spawn', 'sink', 'stove']);
   build.tab = 'dining';
   const d = build.itemsInTab().map(i => i.id).sort();
   assert.deepEqual(norm(d), ['chair', 'table']);
@@ -69,7 +69,7 @@ test('describe() tree includes all items and current tab/active', () => {
   const d = JSON.parse(JSON.stringify(build.describe()));
   assert.equal(d.tab, 'dining');
   assert.equal(d.activeItemId, 'chair');
-  assert.equal(d.items.length, 7);
+  assert.equal(d.items.length, 8);
   // Each item entry is plain JSON.
   for (const i of d.items) {
     assert.equal(typeof i.id, 'string');

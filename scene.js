@@ -179,6 +179,9 @@ class GameScene extends Phaser.Scene {
     this.appManager.register(new SellApp());
     this.appManager.register(new RepairApp());
     this.appManager.register(new RotateApp());
+    this.appManager.register(new AssignApp());
+    // Hidden panel (no launcher) opened by the Assign tool to pick chefs.
+    this.appManager.register(new AssignPickerApp());
     // Between-day surfaces. DayEndApp renders the wrap-up / event resolution
     // (auto-opens at dayEnd). StartDayApp is a separate panel just for the
     // Start Day / Begin Run button — keeps it from being clicked by accident
@@ -292,11 +295,14 @@ class GameScene extends Phaser.Scene {
   }
 
   _previewValidAt(x, y) {
-    const move  = this.appManager.get('move');
-    const sell  = this.appManager.get('sell');
     const build = this.appManager.get('build');
-    if (this.appManager.activeMapToolId === 'move' && move) return move.isValidAt(this.sim, x, y);
-    if (this.appManager.activeMapToolId === 'sell' && sell) return sell.isValidAt(this.sim, x, y);
+    // Any active map tool that exposes isValidAt drives its own hover validity
+    // (move, sell, repair, rotate, assign).
+    const toolId = this.appManager.activeMapToolId;
+    if (toolId) {
+      const tool = this.appManager.get(toolId);
+      if (tool && typeof tool.isValidAt === 'function') return tool.isValidAt(this.sim, x, y);
+    }
     if (build && build.activeItem) return build.isValidAt(this.sim, x, y);
     return false;
   }
@@ -419,14 +425,46 @@ class GameScene extends Phaser.Scene {
 
     Sprites.popups(view, this.sim);
 
+    // Each door shows its live count of not-yet-arrived customers
+    // (sim.incomingByDoor, kept parallel to spawnTiles). Guard against the
+    // array being undefined or a different length than spawnTiles (e.g. a bare
+    // sim, or doors changed since the plan was built) — fall back to 0.
     const doors = this.sim.spawnTiles || [this.sim.spawnTile];
+    const incoming = this.sim.incomingByDoor;
+    const valid = Array.isArray(incoming) && incoming.length === doors.length;
     doors.forEach((sp, i) => {
       if (!sp) return;
       const { sx, sy } = gridToScreen(sp.x, sp.y);
-      this._getText(`door:${i}`, 'DOOR', sx, sy, {
-        fontFamily: 'system-ui', fontSize: '10px', fontStyle: 'bold', color: '#1a3a0a',
+      const n = valid ? incoming[i] : 0;
+      // Lift the count above the door tile (and any customer standing on it)
+      // and give it a light halo so it stays legible against a busy sprite.
+      this._getText(`door:${i}`, String(n), sx, sy - 16, {
+        fontFamily: 'system-ui', fontSize: '12px', fontStyle: 'bold',
+        color: '#ffffff', stroke: '#1a3a0a', strokeThickness: 3,
       });
     });
+    // Retire stale door labels when the door count shrinks (mirror the pad
+    // pattern below).
+    for (let i = doors.length; i < (this._doorLabelCount || 0); i++) {
+      const t = this._texts.get(`door:${i}`);
+      if (t && t.setVisible) t.setVisible(false);
+    }
+    this._doorLabelCount = doors.length;
+
+    // Number each chef spawn pad so the player can match it to the Assign menu.
+    const pads = this.sim.chefSpawnPads ? this.sim.chefSpawnPads() : [];
+    pads.forEach((pad, i) => {
+      const { sx, sy } = gridToScreen(pad.x, pad.y);
+      this._getText(`pad:${i}`, `#${i + 1}`, sx, sy - 14, {
+        fontFamily: 'system-ui', fontSize: '11px', fontStyle: 'bold', color: '#5a3a0a',
+      });
+    });
+    // Retire stale pad labels when pads are removed.
+    for (let i = pads.length; i < (this._padLabelCount || 0); i++) {
+      const t = this._texts.get(`pad:${i}`);
+      if (t && t.setVisible) t.setVisible(false);
+    }
+    this._padLabelCount = pads.length;
   }
 
   /* ---- Ghost-preview helpers ---- */
@@ -434,7 +472,8 @@ class GameScene extends Phaser.Scene {
    *  sprite function we can call). Floor / player_wall items don't. */
   _isBuildingItem(id) {
     return id === 'stove' || id === 'catapult_stove'
-        || id === 'table' || id === 'chair' || id === 'sink';
+        || id === 'table' || id === 'chair' || id === 'sink'
+        || id === 'chef_spawn';
   }
 
   /** Cached, never-placed Building instance for build-mode ghost rendering.
@@ -448,6 +487,7 @@ class GameScene extends Phaser.Scene {
     else if (itemId === 'table')          b = new Table();
     else if (itemId === 'chair')          b = new Chair();
     else if (itemId === 'sink')           b = new Sink();
+    else if (itemId === 'chef_spawn')     b = new ChefSpawn();
     if (b) {
       b._isPreview = true;
       this._buildPreviews[itemId] = b;
@@ -472,11 +512,12 @@ class GameScene extends Phaser.Scene {
    *  switch inside _drawScene's y-sort pass but takes an explicit view +
    *  position so ghost rendering can reuse it. */
   _drawBuildingSprite(view, b, sx, sy, opts) {
-    if      (b.type === 'stove')          Sprites.stove(view, b, sx, sy);
-    else if (b.type === 'catapult_stove') Sprites.catapult_stove(view, b, sx, sy);
-    else if (b.type === 'table')          Sprites.table(view, b, sx, sy);
-    else if (b.type === 'chair')          Sprites.chair(view, b, sx, sy, opts);
-    else if (b.type === 'sink')           Sprites.sink(view, b, sx, sy);
+    // Dispatch by type: every building's draw fn is Sprites[b.type] (e.g.
+    // Sprites.stove, Sprites.chef_spawn). Generic so any building — current or
+    // future — gets a move/build ghost without editing this switch. The extra
+    // opts arg (chair facing) is ignored by sprites that don't read it.
+    const fn = b && Sprites[b.type];
+    if (typeof fn === 'function') fn(view, b, sx, sy, opts);
   }
 
   /* ---- Pooled text (used by Sprites.* helpers) ---- */
@@ -522,7 +563,7 @@ class GameScene extends Phaser.Scene {
 // logical-coord space, but we render into a backing-store that matches the
 // display's physical pixels (CSS px × devicePixelRatio). The camera zoom
 // scales the logical world up to fill the larger canvas. Without this, the
-// canvas (sized at GAME_W = 1080) is CSS-stretched by FIT mode and again by
+// canvas (sized at GAME_W, the top-bar minimum) is CSS-stretched by FIT mode and again by
 // DPR, blurring everything by ~3.5×.
 //
 // MAX_BACKING caps the canvas backing-store so we don't exceed WebGL texture

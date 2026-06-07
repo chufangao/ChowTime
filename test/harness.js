@@ -38,6 +38,7 @@ const SRC_FILES = [
   'src/ui/widgets.js',
   'src/ui/top_bar.js',
   'src/ui/apps/map_tools.js',
+  'src/ui/apps/assign_picker_app.js',
   'src/ui/apps/build_app.js',
   'src/ui/apps/hire_app.js',
   'src/ui/apps/settings_app.js',
@@ -125,6 +126,9 @@ function loadSim({ seed = 1 } = {}) {
       StartDayApp: (typeof StartDayApp === 'function' ? StartDayApp : null),
       MiddayEventApp: (typeof MiddayEventApp === 'function' ? MiddayEventApp : null),
       GameOverApp: (typeof GameOverApp === 'function' ? GameOverApp : null),
+      ChefSpawn: (typeof ChefSpawn === 'function' ? ChefSpawn : null),
+      AssignApp: (typeof AssignApp === 'function' ? AssignApp : null),
+      AssignPickerApp: (typeof AssignPickerApp === 'function' ? AssignPickerApp : null),
       registerDefaultBuildItems: (typeof registerDefaultBuildItems === 'function' ? registerDefaultBuildItems : null),
       MIDDAY_EVENTS: (typeof MIDDAY_EVENTS !== 'undefined' ? MIDDAY_EVENTS : null),
       rollMiddayEvent: (typeof rollMiddayEvent === 'function' ? rollMiddayEvent : null),
@@ -251,6 +255,8 @@ function bootFullShell({ seed = 1, width = 1100, height = 600 } = {}) {
   mgr.register(new ctx.SellApp());
   if (ctx.RepairApp) mgr.register(new ctx.RepairApp());
   if (ctx.RotateApp) mgr.register(new ctx.RotateApp());
+  if (ctx.AssignApp) mgr.register(new ctx.AssignApp());
+  if (ctx.AssignPickerApp) mgr.register(new ctx.AssignPickerApp());
   mgr.register(new ctx.DayEndApp());
   mgr.register(new ctx.StartDayApp());
   if (ctx.MiddayEventApp) mgr.register(new ctx.MiddayEventApp());

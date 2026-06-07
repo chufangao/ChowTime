@@ -46,7 +46,6 @@ class Customer extends Entity {
   constructor(x, y, spawnTime = 0) {
     super(x, y);
     this.spawnTime = spawnTime;
-    this.queueSlot = null;
     this.speed = CONFIG.customerSpeed;
     this.state = CS.ENTERING;
     this.foodPref = FOOD_KEYS[(Math.random() * FOOD_KEYS.length) | 0];
@@ -99,34 +98,16 @@ class Customer extends Entity {
       case CS.ENTERING:
         this.state = CS.SEEKING;
         break;
-      case CS.SEEKING: {
-        // Compute my place in the arrival-ordered queue at MY door. Each door
-        // queues independently; multiple front-of-line customers may try to
-        // seat in parallel.
-        const slot = sim.getQueueSlot(this);
-        const myDoor = this.entryDoor || sim.spawnTiles[0];
-        const myIdx = sim.seekersAtDoor(myDoor).indexOf(this);
-
-        // Re-target whenever my slot shifts (someone ahead got seated).
-        const slotChanged = !this.queueSlot ||
-          this.queueSlot.x !== slot.x || this.queueSlot.y !== slot.y;
-        if (slotChanged) {
-          this.queueSlot = slot;
-          const dist = Math.hypot(slot.x - this.x, slot.y - this.y);
-          if (dist > 0.05) this.setPath([{ x: slot.x, y: slot.y }]);
-          else             this.path = null;
-        }
-
-        // Only the front-of-queue customer actually tries seats.
-        if (!this.hasPath() && myIdx === 0) {
-          this.retrySeatTimer -= dt;
-          if (this.retrySeatTimer <= 0) {
-            this.retrySeatTimer = 0.6;
-            this.trySeat(sim);
-          }
+      case CS.SEEKING:
+        // No door queue: each seeker waits where it entered and tries to grab
+        // an open seat on its own retry timer. trySeat reserves the chair
+        // atomically, so parallel seekers don't double-book within a tick.
+        this.retrySeatTimer -= dt;
+        if (this.retrySeatTimer <= 0) {
+          this.retrySeatTimer = 0.6;
+          this.trySeat(sim);
         }
         break;
-      }
       case CS.WALKING:
         if (arrived) {
           this.state = CS.WAITING;
@@ -225,7 +206,6 @@ class Customer extends Entity {
     chair.occupyingCustomer = this; table.occupyingCustomer = this;
     this.chair = chair; this.table = table;
     this.setPath(path); this.state = CS.WALKING;
-    this.queueSlot = null;
   }
 
   leave(sim, reason) {
@@ -233,7 +213,6 @@ class Customer extends Entity {
     if (this.chair) this.chair.occupyingCustomer = null;
     if (this.table) this.table.occupyingCustomer = null;
     this.state = CS.LEAVING;
-    this.queueSlot = null;
 
     // Abandon any in-flight order so cooks don't deliver to an empty seat.
     if (this.order) {
@@ -264,17 +243,21 @@ class Customer extends Entity {
     // Happy-path earnings are credited per course in _consumePlate; nothing
     // else to do here beyond the state transition and exit path.
 
-    // Queue-giver-upper: already off-grid, just keep walking outward.
-    if (this.x < 0)                  { this.setPath([{ x: -5, y: this.y }]); return; }
-    if (this.x >= sim.grid.cols)     { this.setPath([{ x: sim.grid.cols + 5, y: this.y }]); return; }
-    if (this.y < 0)                  { this.setPath([{ x: this.x, y: -5 }]); return; }
-    if (this.y >= sim.grid.rows)     { this.setPath([{ x: this.x, y: sim.grid.rows + 5 }]); return; }
-
-    const exit = sim.closestSpawn(this.tileX(), this.tileY());
-    const path = sim.pathfinder.findPath(
-      this.tileX(), this.tileY(),
-      (x, y) => x === exit.x && y === exit.y,
-      (x, y) => sim.grid.isWalkable(x, y));
-    if (path) this.setPath(path); else this.alive = false;
+    // Exit via the nearest door we can actually reach. Try doors in ascending
+    // Manhattan distance; the first with a valid path wins. Only give up
+    // (alive=false) if none are reachable (e.g. every door walled off).
+    const here = { x: this.tileX(), y: this.tileY() };
+    const doors = sim.spawnTiles.slice().sort((a, b) =>
+      (Math.abs(a.x - here.x) + Math.abs(a.y - here.y)) -
+      (Math.abs(b.x - here.x) + Math.abs(b.y - here.y)));
+    let routed = false;
+    for (const exit of doors) {
+      const path = sim.pathfinder.findPath(
+        here.x, here.y,
+        (x, y) => x === exit.x && y === exit.y,
+        (x, y) => sim.grid.isWalkable(x, y));
+      if (path) { this.setPath(path); routed = true; break; }
+    }
+    if (!routed) this.alive = false;
   }
 }

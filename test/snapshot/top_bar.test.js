@@ -31,10 +31,11 @@ test('idle shell describe(): widgets present, no app open, all apps registered',
   // midday_event is included because it has hasPanel:true even though its
   // launcher button isn't user-clickable in normal flow (auto-opened only).
   const launcherIds = tb.panelApps.map(a => a.id).sort();
+  // assignPicker is launcherHidden, so it does not appear as a launcher.
   assert.deepEqual(launcherIds, ['build', 'day_end', 'hire', 'midday_event', 'settings', 'start_day']);
-  // Map tools: move, sell.
+  // Map tools: move, sell, repair, rotate, assign.
   const mapToolIds = tb.mapTools.map(a => a.id).sort();
-  assert.deepEqual(mapToolIds, ['move', 'sell']);
+  assert.deepEqual(mapToolIds, ['assign', 'move', 'repair', 'rotate', 'sell']);
   // No app currently active.
   for (const a of tb.panelApps) assert.equal(a.active, false);
   for (const t of tb.mapTools) assert.equal(t.active, false);
@@ -105,6 +106,30 @@ test('full describe() tree round-trips through JSON', () => {
   assert.ok(Array.isArray(parsed.apps));
   assert.ok(Array.isArray(parsed.widgets));
   assert.ok(Array.isArray(parsed.buildItems));
-  assert.equal(parsed.buildItems.length, 7);
+  assert.equal(parsed.buildItems.length, 8);
+});
+
+// Regression: every top-bar button must actually render (get a bound zone) at
+// the canvas's minimum width. Adding a map tool once pushed the Start Day
+// launcher off the bar, making the day un-startable. TOP_BAR_W_MIN (sprites.js,
+// 1240) is sized so all 6 panel launchers + 5 map tools + speed fit; this guards
+// that budget. (Stub scene has no real GAME_W, so we drive width explicitly.)
+test('all launchers + tools fit on the bar at min canvas width (no clipping)', () => {
+  const { sim, topBar } = bootFullShell({ seed: 1, width: 1240, height: 600 });
+  // Worst case for widget widths: high day/money/stats.
+  sim.day = 18; sim.dayState = 'dayEnd'; sim.money = 999999; sim.reputation = 100;
+  sim.eventOutcome = { passed: true };
+  sim.stats = { served: 888, angry: 777, plates: 666, tipsTotal: 99999 };
+  const bound = new Set();
+  const realBind = topBar._bindZone.bind(topBar);
+  topBar._bindZone = (key, ...rest) => { bound.add(key); return realBind(key, ...rest); };
+  topBar.W = 1240;
+  topBar.refresh(sim);
+  for (const id of ['build', 'hire', 'settings', 'day_end', 'start_day', 'midday_event']) {
+    assert.ok(bound.has(`app:${id}`), `launcher ${id} should be drawn, not clipped`);
+  }
+  for (const id of ['move', 'sell', 'repair', 'rotate', 'assign']) {
+    assert.ok(bound.has(`tool:${id}`), `map tool ${id} should be drawn, not clipped`);
+  }
 });
 

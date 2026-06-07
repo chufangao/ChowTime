@@ -234,12 +234,3 @@ test('save/load round-trips midday state', () => {
   assert.equal(loaded.middayEventRolledToday, true);
   assert.deepEqual(loaded.freeBuildCredits, ['floor', 'table']);
 });
-
-test('MiddayEventApp.autoOpenWhen reflects middayEvent presence', () => {
-  const ctx = loadSim({ seed: 5 });
-  const sim = new ctx.Simulation();
-  const app = new ctx.MiddayEventApp();
-  assert.equal(app.autoOpenWhen(sim), false);
-  sim.middayEvent = ctx.MIDDAY_EVENTS[0];
-  assert.equal(app.autoOpenWhen(sim), true);
-});

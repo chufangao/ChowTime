@@ -45,10 +45,13 @@ const BOT_MARGIN  = 22;
 //
 // GAME_W: needs to be >= the top-bar's natural width (status widgets +
 // panel-app launchers + map tools + speed). The grid alone is ~774px, but
-// the top bar needs ~1080px to render every button without overlap. Whichever
-// is larger wins; the iso grid is then centered horizontally inside.
+// the top bar needs enough room to render every button without clipping —
+// 6 panel launchers (Build/Hire/Settings/Review/Start Day/Event) + 5 map
+// tools (Move/Sell/Repair/Rotate/Assign) + speed. Empirically ~1200px fits
+// all of them even at max widget widths; we add headroom. Whichever is
+// larger wins; the iso grid is then centered horizontally inside.
 const GRID_W_NATURAL = LEFT_MARGIN + ROWS * ISO_TW + COLS * ISO_TW + RIGHT_MARGIN;
-const TOP_BAR_W_MIN  = 1080;
+const TOP_BAR_W_MIN  = 1240;
 const GAME_W = Math.max(GRID_W_NATURAL, TOP_BAR_W_MIN);
 // Recenter the grid horizontally if the canvas is wider than the natural grid.
 const _GRID_PAD_X = Math.floor((GAME_W - GRID_W_NATURAL) / 2);
@@ -566,6 +569,30 @@ const Sprites = {
       g.fillStyle(0xaaaaaa, 1); g.fillCircle(sx, sy - H, 3);
     }
     if (b.broken) Sprites.drawBrokenOverlay(view, b, sx, sy);
+  },
+
+  /* ---- Chef spawn point ---- *
+   * Flat, walkable floor pad. Entities path straight over it, so it draws low:
+   * a gold diamond mat with a dashed inner ring and a small chef-hat mark. */
+  chef_spawn(view, b, sx, sy) {
+    const { g } = view;
+    // Mat: two stacked diamonds for a framed pad look (distinct from the green
+    // door tile and the floor checker).
+    drawDiamond(g, sx, sy, ISO_TW - 3, ISO_TH - 2, 0xe2a33a, COLORS.outline, 2, 0.9);
+    drawDiamond(g, sx, sy, ISO_TW - 12, ISO_TH - 7, 0xf6d27a, COLORS.outline, 1, 0.95);
+    // Chef toque, centred and floating just above the mat.
+    const hy = sy - 8;
+    g.fillStyle(0xffffff, 1);
+    g.lineStyle(1.5, COLORS.outline, 1);
+    g.fillCircle(sx - 5, hy - 3, 4);
+    g.fillCircle(sx + 5, hy - 3, 4);
+    g.fillCircle(sx, hy - 6, 5);
+    g.fillRect(sx - 7, hy - 3, 14, 6);
+    g.strokeRect(sx - 7, hy - 3, 14, 6);
+    g.fillStyle(0xeaeaea, 1);
+    g.fillRect(sx - 8, hy + 2, 16, 3);
+    g.lineStyle(1.5, COLORS.outline, 1);
+    g.strokeRect(sx - 8, hy + 2, 16, 3);
   },
 
   /* ---- Customer (body into g, bubbles/bars into overlay, labels via text) ---- */

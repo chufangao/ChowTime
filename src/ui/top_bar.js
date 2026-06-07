@@ -152,7 +152,7 @@ class TopBar {
     // ---- CENTER region: panel-app launchers ----
     // Game-over modal stays out (player can't dismiss it anyway).
     const panelApps = this.manager.appOrder.filter(a =>
-      a.hasPanel && a.id !== 'game_over'
+      a.hasPanel && a.id !== 'game_over' && !a.launcherHidden
     );
     const centerW = panelApps.length * BTN_W + Math.max(0, panelApps.length - 1) * BTN_GAP;
     const gap = rightLeftEdge - leftRightEdge;
@@ -315,7 +315,7 @@ class TopBar {
         typeof w.describe === 'function' ? w.describe(sim) : { id: w.id }
       ),
       panelApps: this.manager.appOrder
-        .filter(a => a.hasPanel && a.id !== 'game_over')
+        .filter(a => a.hasPanel && a.id !== 'game_over' && !a.launcherHidden)
         .map(a => ({
           id: a.id, icon: a.icon, title: a.title,
           active: this.manager.activeAppId === a.id,

@@ -56,6 +56,10 @@ class Employee extends Entity {
     // accumulates for the run. Status is an event-driven effect on next
     // day's availability / behavior (e.g. {kind:'busy', daysLeft:1}).
     this.isStarter = !!preset.isStarter;
+    // Assigned chef spawn point as a {x,y} tile coord, or null for the default
+    // door. Set via the Assign tool; consumed by Simulation.chefSpawnTileFor at
+    // day start. Stored by coordinate so it survives save/load without id remap.
+    this.spawnPoint = null;
     this.dayStats  = { dishes: 0, tipsEarned: 0, timesTired: 0, procs: 0 };
     this.career    = { dishes: 0, tipsEarned: 0, timesTired: 0, procs: 0, daysWorked: 0 };
     this.status    = null;

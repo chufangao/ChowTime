@@ -119,6 +119,9 @@ const TextureBaker = (() => {
     _bake(scene, 'building_sink', (v, sx, sy) => {
       Sprites.sink(v, new Sink(), sx, sy);
     });
+    _bake(scene, 'building_chef_spawn', (v, sx, sy) => {
+      Sprites.chef_spawn(v, new ChefSpawn(), sx, sy);
+    });
 
     // Chairs are facing-sensitive. Bake one frame per cardinal so phase 4
     // can pick the right key without an additional runtime rotation step.

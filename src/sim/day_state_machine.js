@@ -119,6 +119,7 @@ class DayStateMachine {
     }
     sim.dayQuota      = this._computeDayQuota(sim.day);
     sim.daySpawned    = 0;
+    sim.planDoorArrivals();   // distribute dayQuota across doors → sim.incomingByDoor
     sim.spawnTimer    = 0.5;
     sim.dayState      = 'spawning';
     sim.dayStartMoney = sim.money;
@@ -135,6 +136,18 @@ class DayStateMachine {
     for (const e of sim.employees) {
       e.dayStats = { dishes: 0, tipsEarned: 0, timesTired: 0, procs: 0 };
       e.career.daysWorked++;
+      // A chef assigned to a spawn point starts each shift there. Unassigned
+      // chefs are left where they are — they already begin life at the default
+      // door (see hireFromRoster/hireEmployee), so there's nothing to relocate.
+      // Snap position and clear any residual working state so the teleported
+      // chef starts the day idle.
+      if (e.spawnPoint) {
+        const t = sim.chefSpawnTileFor(e);
+        e.x = t.x; e.y = t.y;
+        e.path = null; e.pathIdx = 0;
+        e.state = ES.IDLE; e.task = null;
+        e.carrying = null; e.carryingDirty = false;
+      }
     }
 
     sim.currentEvent      = null;

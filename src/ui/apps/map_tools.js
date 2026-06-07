@@ -155,6 +155,28 @@ class RotateApp extends MapToolApp {
   }
 }
 
+// Assign: clicking a placed chef spawn point opens the chef picker focused on
+// that pad. Pure router — the actual assign/unassign toggles live in
+// AssignPickerApp. Locked during service (assignment is a between-day edit).
+class AssignApp extends MapToolApp {
+  constructor() { super({ id: 'assign', icon: '👨‍🍳', title: 'Assign' }); }
+
+  onMapClick(sim, tile, _button) {
+    if (!tile) return;
+    const t = sim.grid.getTile(tile.x, tile.y);
+    if (!t || !t.building || t.building.type !== 'chef_spawn') return;
+    const picker = this.manager && this.manager.get && this.manager.get('assignPicker');
+    if (!picker) return;
+    picker.target = { x: tile.x, y: tile.y };
+    this.manager.open('assignPicker');
+  }
+
+  isValidAt(sim, x, y) {
+    const t = sim.grid.getTile(x, y);
+    return !!(t && t.building && t.building.type === 'chef_spawn');
+  }
+}
+
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { MapToolApp, MoveApp, SellApp, RepairApp, RotateApp };
+  module.exports = { MapToolApp, MoveApp, SellApp, RepairApp, RotateApp, AssignApp };
 }

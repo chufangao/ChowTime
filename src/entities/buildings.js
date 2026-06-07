@@ -183,6 +183,15 @@ class Chair extends Building {
   }
 }
 
+// Chef spawn point: a walkable floor marker the player places and assigns
+// chefs to. Carries no game logic — Simulation.chefSpawnTileFor reads the
+// chef's assignment against the live grid, and DayStateMachine.startNextDay
+// snaps each chef to its assigned pad at day start. Walkable so chefs and
+// customers path straight over it (multiple chefs may share one).
+class ChefSpawn extends Building {
+  constructor() { super('chef_spawn'); this.walkable = true; }
+}
+
 class Sink extends Building {
   constructor() { super('sink'); this.washing = null; this.reservedFor = null; }
   isAvailable() { return !this.washing && !this.reservedFor; }
@@ -270,6 +279,13 @@ const CHAIR_ITEM = {
   validAt: _emptyTileValidAt, place: _placeBuilding('chair'),
 };
 
+const CHEF_SPAWN_ITEM = {
+  id: 'chef_spawn', label: 'Chef Spawn', category: 'kitchen',
+  cost: _cost('chef_spawn'), icon: '👨‍🍳',
+  hint: 'A station chefs start their shift at. Assign chefs with the 👨‍🍳 tool; unassigned chefs use the door.',
+  validAt: _emptyTileValidAt, place: _placeBuilding('chef_spawn'),
+};
+
 // Floor: fills a default-layout gap with solid floor for $150. The "buy a
 // floor tile" mechanic that replaces the old "demolish structural wall".
 const FLOOR_ITEM = {
@@ -297,6 +313,7 @@ function registerDefaultBuildItems(manager) {
   manager.registerBuildItem(STOVE_ITEM);
   manager.registerBuildItem(CATAPULT_STOVE_ITEM);
   manager.registerBuildItem(SINK_ITEM);
+  manager.registerBuildItem(CHEF_SPAWN_ITEM);
   manager.registerBuildItem(TABLE_ITEM);
   manager.registerBuildItem(CHAIR_ITEM);
   manager.registerBuildItem(FLOOR_ITEM);

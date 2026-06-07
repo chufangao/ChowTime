@@ -122,6 +122,12 @@ class Simulation {
     this.spawnTiles = [{ x: 0, y: 4 }];
     this.grid.setType(0, 4, 'spawn');
 
+    // Parallel to spawnTiles: each door's count of not-yet-arrived customers
+    // for the current day. Rebuilt each day by DayStateMachine.startNextDay via
+    // planDoorArrivals(); sums to (dayQuota - daySpawned). Not serialized — saves
+    // happen only at dayEnd, when this is all-zeros anyway.
+    this.incomingByDoor = [0];
+
     // Live recruit pool. Each entry carries an `id` (stable across the run)
     // used by the UI to identify the chef clicked. Shuffle so the player sees
     // a different order every session; removed on hire so every chef is unique.
@@ -150,6 +156,82 @@ class Simulation {
       if (md < bestD) { bestD = md; best = d; }
     }
     return best;
+  }
+
+  // Deterministic mulberry32 PRNG used ONLY for distributing arrivals across
+  // doors. Deliberately separate from Math.random: door planning is cosmetic
+  // and must not perturb the seeded gameplay RNG stream (customer abilities,
+  // event rolls, anger/win-loss), which the deterministic tests depend on.
+  // Seeded from the day so the spread varies day to day.
+  _doorRng(seed) {
+    let s = (seed >>> 0) || 1;
+    return () => {
+      s = (s + 0x6D2B79F5) >>> 0;
+      let t = s;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // Distribute this day's full quota randomly across the doors into
+  // incomingByDoor (an int array parallel to spawnTiles). Each of the dayQuota
+  // arrivals is assigned to a door via the dedicated _doorRng, so per-door
+  // shares are random but always sum to exactly dayQuota (1 door → it gets all)
+  // WITHOUT touching the gameplay Math.random stream. Rebuilt every day by
+  // DayStateMachine.startNextDay right after dayQuota is set.
+  planDoorArrivals() {
+    const n = this.spawnTiles.length || 1;
+    const plan = new Array(n).fill(0);
+    const quota = Math.max(0, this.dayQuota | 0);
+    const rnd = this._doorRng(this.day);
+    for (let k = 0; k < quota; k++) plan[(rnd() * n) | 0]++;
+    this.incomingByDoor = plan;
+  }
+
+  // Pick a door that still has planned arrivals, decrement its count, and
+  // return it. Returns null when there's no usable plan (missing array, length
+  // mismatch with spawnTiles, or all-zero) so spawnCustomer falls back to
+  // randomSpawn — this preserves behavior for tests that call spawnCustomer
+  // directly without going through startNextDay/planDoorArrivals.
+  _takeDoorFromPlan() {
+    const plan = this.incomingByDoor;
+    if (!Array.isArray(plan) || plan.length !== this.spawnTiles.length) return null;
+    const avail = [];
+    for (let i = 0; i < plan.length; i++) if (plan[i] > 0) avail.push(i);
+    if (!avail.length) return null;
+    const idx = avail[(Math.random() * avail.length) | 0];
+    plan[idx]--;
+    return this.spawnTiles[idx];
+  }
+
+  // Resolve where a chef should start its shift. A chef assigned to a spawn
+  // point (emp.spawnPoint = {x,y}) starts there, as long as a chef_spawn
+  // building still occupies that tile; otherwise it falls back to the primary
+  // door. Used by DayStateMachine.startNextDay to place chefs each morning.
+  chefSpawnTileFor(emp) {
+    const sp = emp && emp.spawnPoint;
+    if (sp) {
+      const t = this.grid.getTile(sp.x, sp.y);
+      if (t && t.building && t.building.type === 'chef_spawn') return { x: sp.x, y: sp.y };
+    }
+    return this.spawnTiles[0];
+  }
+
+  // Chef spawn pads in a stable display order (top-left to bottom-right), so
+  // the on-map number labels and the Assign menu agree. Used for the "Pad #N"
+  // labels the player sees in both places.
+  chefSpawnPads() {
+    return this.buildings
+      .filter(b => b.type === 'chef_spawn')
+      .sort((a, b) => a.y - b.y || a.x - b.x);
+  }
+
+  // 1-based pad number for the pad at (x,y), or null if none. Matches the order
+  // from chefSpawnPads().
+  chefSpawnLabelAt(x, y) {
+    const i = this.chefSpawnPads().findIndex(b => b.x === x && b.y === y);
+    return i >= 0 ? i + 1 : null;
   }
 
   seedDemo() {
@@ -216,6 +298,7 @@ class Simulation {
     else if (type === 'table') b = new Table();
     else if (type === 'chair') b = new Chair();
     else if (type === 'sink')  b = new Sink();
+    else if (type === 'chef_spawn') b = new ChefSpawn();
     else return { ok: false, reason: 'bad-type' };
     if (!this.grid.placeBuilding(b, x, y)) return { ok: false, reason: 'grid-reject' };
     this.buildings.push(b); b.onPlaced(this);
@@ -255,6 +338,12 @@ class Simulation {
     // existing instance; it does not allocate.
     this.grid.removeBuildingAt(fx, fy);
     this.grid.placeBuilding(b, tx, ty);
+    // Chef assignments follow their spawn point when it's relocated.
+    if (b.type === 'chef_spawn') {
+      for (const e of this.employees) {
+        if (e.spawnPoint && e.spawnPoint.x === fx && e.spawnPoint.y === fy) e.spawnPoint = { x: tx, y: ty };
+      }
+    }
     if (moveCost > 0 && !this.debug) this.money -= moveCost;
     return { ok: true };
   }
@@ -263,6 +352,13 @@ class Simulation {
     const b = this.grid.removeBuildingAt(x, y); if (!b) return false;
     b.onRemoved(this);
     const i = this.buildings.indexOf(b); if (i >= 0) this.buildings.splice(i, 1);
+    // A removed chef spawn point un-assigns any chefs pointing at it — they
+    // revert to the default door next morning.
+    if (b.type === 'chef_spawn') {
+      for (const e of this.employees) {
+        if (e.spawnPoint && e.spawnPoint.x === x && e.spawnPoint.y === y) e.spawnPoint = null;
+      }
+    }
     // Layout edits can only happen during dayEnd (enforced in the scene's
     // input layer), when no customers are alive — so occupyingCustomer is
     // always null here and no evict path is needed.
@@ -410,7 +506,7 @@ class Simulation {
   }
 
   spawnCustomer() {
-    const door = this.randomSpawn();
+    const door = this._takeDoorFromPlan() || this.randomSpawn();
     const c = new Customer(door.x, door.y, this.time);
     c.entryDoor = { x: door.x, y: door.y };
     // Food bias from today's forecast: 70% of customers chase the hot menu.
@@ -423,49 +519,6 @@ class Simulation {
   }
 
   submitOrder(o) { this.orders.push(o); }
-
-  getSeekingCustomers() {
-    return this.customers
-      .filter(c => c.alive && (c.state === CS.SEEKING || c.state === CS.ENTERING))
-      .sort((a, b) => a.spawnTime - b.spawnTime);
-  }
-
-  // Seekers queueing at a specific door, arrival-ordered. Customers without an
-  // entryDoor (e.g. tests that bypass spawnCustomer) match every door so the
-  // single-door legacy case still works. Used by both customer.update (to
-  // determine my place in line) and getQueueSlot (to resolve the slot index
-  // given just a Customer ref).
-  seekersAtDoor(door) {
-    if (!door) return [];
-    return this.customers
-      .filter(s => s.alive && (s.state === CS.SEEKING || s.state === CS.ENTERING))
-      .filter(s => !s.entryDoor || (s.entryDoor.x === door.x && s.entryDoor.y === door.y))
-      .sort((a, b) => a.spawnTime - b.spawnTime);
-  }
-
-  // Slot 0 is at the door; later slots extend OUTWARD from the restaurant
-  // along whichever perimeter edge the door sits on, so the queue forms
-  // visibly outside. With multiple doors, each door gets its own queue.
-  getQueueSlot(indexOrCustomer) {
-    let door = this.spawnTiles[0];
-    let index = indexOrCustomer;
-    if (typeof indexOrCustomer === 'object' && indexOrCustomer !== null) {
-      const c = indexOrCustomer;
-      if (c.entryDoor) door = c.entryDoor;
-      index = this.seekersAtDoor(door).indexOf(c);
-      if (index < 0) index = 0;
-    }
-    const maxVisible = 4;
-    const effIdx = Math.min(index, maxVisible);
-    // Direction outward from the perimeter edge the door is on.
-    let dx = 0, dy = 0;
-    if      (door.x === 0)            dx = -1;
-    else if (door.x === this.grid.cols - 1) dx =  1;
-    else if (door.y === 0)            dy = -1;
-    else if (door.y === this.grid.rows - 1) dy =  1;
-    else                              dx = -1;   // interior fallback (shouldn't happen)
-    return { x: door.x + effIdx * 0.9 * dx, y: door.y + effIdx * 0.9 * dy };
-  }
 
   findAvailableChair() {
     for (const b of this.buildings) {

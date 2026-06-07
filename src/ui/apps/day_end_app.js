@@ -16,6 +16,23 @@
 class DayEndApp extends App {
   constructor() {
     super({ id: 'day_end', icon: '📅', title: 'Review', isModal: false });
+    // Chef-card scroll offset, in rows (2 chefs per row). Lets the roster grow
+    // past the visible window (e.g. when assigning chefs to many spawn pads).
+    this.scrollRow = 0;
+  }
+
+  // Max chef-card rows shown at once; the rest scroll into view via the wheel.
+  _visibleChefRows() { return 4; }
+
+  onOpen() { this.scrollRow = 0; }
+
+  // Wheel scrolls the chef roster when it overflows the visible window.
+  onWheel(_p, dy) {
+    const sim = this.manager && this.manager._sim;
+    const n = (sim && sim.employees) ? sim.employees.length : 0;
+    const maxScroll = Math.max(0, Math.ceil(n / 2) - this._visibleChefRows());
+    if (maxScroll === 0) return;
+    this.scrollRow = Math.max(0, Math.min(maxScroll, this.scrollRow + (dy > 0 ? 1 : -1)));
   }
 
   // Wider/taller than the default — chef cards have full portraits and the
@@ -73,9 +90,17 @@ class DayEndApp extends App {
   _renderChefCards(sim, r, dg, used, top) {
     const colW = (r.w - 36 - 12) / 2;
     const cardH = 88;
-    const list = sim.employees.slice(0, 8);
+    const cols = 2;
+    const all = sim.employees;
+    const totalRows = Math.ceil(all.length / cols);
+    const visibleRows = Math.min(this._visibleChefRows(), Math.max(1, totalRows));
+    const maxScroll = Math.max(0, totalRows - visibleRows);
+    // Clamp here too: the roster can shrink (e.g. a chef leaves) between frames.
+    this.scrollRow = Math.max(0, Math.min(this.scrollRow, maxScroll));
+    const startIdx = this.scrollRow * cols;
+    const list = all.slice(startIdx, startIdx + cols * visibleRows);
     this._drawCardGrid(list,
-      { x: r.x + 18, y: top, cols: 2, cardW: colW, cardH, colGap: 12, rowGap: 8 },
+      { x: r.x + 18, y: top, cols, cardW: colW, cardH, colGap: 12, rowGap: 8 },
       (e, cx, yy) => {
         const busy = e.status && e.status.kind === 'busy';
         if (dg) {
@@ -122,8 +147,19 @@ class DayEndApp extends App {
           font: 'bold 10px system-ui', color: '#ff7070',
         });
       });
-    const rows = Math.ceil(Math.min(sim.employees.length, 8) / 2);
-    return top + rows * (cardH + 8);
+    // Scroll indicator on the right edge of the chef area when the roster
+    // overflows the visible window (matches the Hire/Assign panels).
+    const areaH = visibleRows * (cardH + 8);
+    if (maxScroll > 0) {
+      if (dg) {
+        const trackX = r.x + r.w - 12, trackY = top, trackH = areaH - 8, trackW = 4;
+        dg.fillStyle(0x231a30, 1); dg.fillRoundedRect(trackX, trackY, trackW, trackH, 2);
+        const thumbH = Math.max(20, Math.floor(trackH * (visibleRows / totalRows)));
+        const thumbY = trackY + Math.floor((trackH - thumbH) * (this.scrollRow / maxScroll));
+        dg.fillStyle(0x6b5ba8, 1); dg.fillRoundedRect(trackX, thumbY, trackW, thumbH, 2);
+      }
+    }
+    return top + areaH;
   }
 
   /* ---- Event history log -------------------------------------------------- */

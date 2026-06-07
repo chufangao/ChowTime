@@ -8,7 +8,7 @@
  *
  * Pipeline per attempt (gap-default):
  *   1. Initialize gapSet = every interior tile (perimeter is always walkable
- *      so doors and queues fit).
+ *      so doors stay reachable).
  *   2. Roll N=1..5 doors uniformly across the perimeter (biased away from the
  *      west edge for variety).
  *   3. Pick a kernel (straight, serpentine, branching, starburst, ...).

@@ -50,6 +50,7 @@ function serializeSim(sim, uiState) {
     dayStats: e.dayStats ? { ...e.dayStats } : null,
     career:   e.career   ? { ...e.career }   : null,
     status:   e.status   ? { ...e.status }   : null,
+    spawnPoint: e.spawnPoint ? { x: e.spawnPoint.x, y: e.spawnPoint.y } : null,
     x: e.x, y: e.y,
   }));
 
@@ -205,6 +206,7 @@ function deserializeSim(json) {
     if (es.dayStats) e.dayStats = { ...es.dayStats };
     if (es.career)   e.career   = { ...es.career };
     if (es.status)   e.status   = { ...es.status };
+    e.spawnPoint = es.spawnPoint ? { x: es.spawnPoint.x, y: es.spawnPoint.y } : null;
     sim.employees.push(e);
     idMap.employees.set(es.id, e);
   }
@@ -348,6 +350,7 @@ function describeSim(sim) {
       isStarter: !!e.isStarter, abilities: (e.abilities || []).slice().sort(),
       tired: !!e.tired,
       status: e.status ? { ...e.status } : null,
+      spawnPoint: e.spawnPoint ? { x: e.spawnPoint.x, y: e.spawnPoint.y } : null,
     })),
     recruitPool: (sim.recruitPool || []).map(p => p.id).sort((a, b) => a - b),
     currentEventId: sim.currentEvent ? sim.currentEvent.id : null,

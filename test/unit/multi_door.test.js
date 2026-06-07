@@ -66,22 +66,6 @@ test('back-compat: sim.spawnTile / sim.exitTile resolve to spawnTiles[0]', () =>
   assert.deepEqual({ x: sim.exitTile.x, y: sim.exitTile.y }, { x: 0, y: 4 });
 });
 
-test('queue slot extends outward from the customer\'s entry door edge', () => {
-  // West-edge door → slot extends west (negative x). East-edge door → east.
-  const ctx = loadSim({ seed: 1 });
-  const sim = new ctx.Simulation();
-  sim.spawnTiles = [{ x: 0, y: 4 }, { x: 11, y: 4 }];
-  // Stub a customer at door 0 (west).
-  const cWest = { alive: true, state: ctx.CS.SEEKING, entryDoor: { x: 0, y: 4 }, spawnTime: 1 };
-  const cEast = { alive: true, state: ctx.CS.SEEKING, entryDoor: { x: 11, y: 4 }, spawnTime: 2 };
-  sim.customers.push(cWest, cEast);
-  const slotW = sim.getQueueSlot(cWest);
-  const slotE = sim.getQueueSlot(cEast);
-  // Slot 0 sits at the door tile itself.
-  assert.equal(slotW.x, 0); assert.equal(slotW.y, 4);
-  assert.equal(slotE.x, 11); assert.equal(slotE.y, 4);
-});
-
 test('multi-door layout: customer from door A exits via closest door', () => {
   const ctx = loadSim({ seed: 7 });
   const sim = new ctx.Simulation();
@@ -96,4 +80,26 @@ test('multi-door layout: customer from door A exits via closest door', () => {
   c.entryDoor = { x: 0, y: 4 };
   const exit = sim.closestSpawn(c.tileX(), c.tileY());
   assert.deepEqual({ x: exit.x, y: exit.y }, { x: 11, y: 4 });
+});
+
+test('leave: customer reroutes to the next-closest door when the closest is unreachable', () => {
+  const ctx = loadSim({ seed: 3 });
+  const sim = new ctx.Simulation();
+  sim.spawnTiles = [{ x: 0, y: 4 }, { x: 11, y: 4 }];
+  sim.grid.setType(0, 4, 'spawn');
+  sim.grid.setType(11, 4, 'spawn');
+  // Isolate the west door: wall every walkable neighbor so it's unreachable.
+  sim.grid.setType(1, 4, 'wall');
+  sim.grid.setType(0, 3, 'wall');
+  sim.grid.setType(0, 5, 'wall');
+  // Customer mid-floor: west door is closer (Manhattan 5) than east (6) but
+  // walled off, so leave() must fall back to the reachable east door.
+  const c = new ctx.Customer(5, 4, 0);
+  sim.customers.push(c);
+  c.leave(sim, 'happy');
+  assert.equal(c.alive, true, 'customer should not vanish when the closest door is walled off');
+  assert.ok(c.path && c.path.length, 'customer should have an exit path');
+  const last = c.path[c.path.length - 1];
+  assert.deepEqual({ x: last.x, y: last.y }, { x: 11, y: 4 },
+    'customer should route to the reachable east door');
 });

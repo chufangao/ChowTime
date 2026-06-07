@@ -30,6 +30,7 @@ const CONFIG = {
   startingMoney: 200,
   costs: {
     stove: 150, catapult_stove: 300, table: 50, chair: 20, sink: 120, employee: 200,
+    chef_spawn: 100,           // walkable chef start-of-shift station
     floor: 150,                // fill a default-layout gap with solid floor
     player_wall: 0,            // free, lightweight partition
     move_furniture: 80,        // anything except table, chair, player_wall
