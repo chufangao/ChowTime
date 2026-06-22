@@ -173,6 +173,9 @@ class GameScene extends Phaser.Scene {
     // so the HUD never flashes on the world camera (or vice-versa). update()
     // re-runs this each frame to catch lazily-created objects.
     this._partitionCameras();
+
+    // Procedural background music + SFX (browser-only; observes sim each frame).
+    if (typeof GameSound !== 'undefined') { GameSound.resume(); GameSound.startMusic(); }
   }
 
   /* ---- Cameras: movable world cam + fixed UI cam ----
@@ -354,6 +357,9 @@ class GameScene extends Phaser.Scene {
     // Catch objects created this frame (pooled world/HUD text, app panels,
     // newly-placed-room floor sprites) so each lands on exactly one camera.
     this._partitionCameras();
+
+    // SFX + music intensity driven off post-update sim state (no-op if muted).
+    if (typeof GameSound !== 'undefined') GameSound.observe(this.sim);
 
     if (perf) this._updatePerfOverlay(perf, t0, tSim, perf.now(), dtMs);
   }
@@ -826,6 +832,9 @@ window.startChowTime = function (opts) {
   // Seed all randomness from today's date BEFORE the sim/Phaser are created so
   // the entire run (and Phaser's own RNG usage) is deterministic for the day.
   _seedRandomFromDate();
+  // Unlock audio on this (Play-click) user gesture — browsers suspend the
+  // AudioContext until one. Music is started later in GameScene.create().
+  if (typeof GameSound !== 'undefined') { GameSound.init(); GameSound.resume(); }
   // Stash opts on window — GameScene.create reads them. This avoids the
   // gotcha of trying to pass per-instance data through the Phaser.Scene ctor.
   window.__chowTimeInitOpts = opts || {};

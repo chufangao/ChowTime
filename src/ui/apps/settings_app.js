@@ -45,6 +45,16 @@ class SettingsApp extends App {
       sx += 50 + 6;
     }
 
+    // --- Sound toggle (shares the Speed row, on the right) ---
+    const soundOn = (typeof GameSound !== 'undefined') ? !GameSound.isMuted() : true;
+    this._drawPanelButton('sound', r.x + 300, r.y + 56, 120, 30, {
+      label: soundOn ? '🔊 Sound On' : '🔇 Muted', font: 'bold 12px system-ui',
+      fill: soundOn ? 0x2d6a3c : 0x3d2d5c, color: '#ffffff',
+      radius: 6, shadow: false, border: false,
+      labelX: r.x + 316, labelY: r.y + 62,
+      onClick: () => { if (typeof GameSound !== 'undefined') GameSound.toggleMute(); },
+    }, used, usedZones);
+
     // --- Debug toggle ---
     const debugOn = !!(sim && sim.debug);
     this._t(used, 'd:l', 'Debug Mode', r.x + 18, r.y + 110, { font: 'bold 14px system-ui', color: '#fff' });
