@@ -175,6 +175,14 @@ const _LAYOUT_TEMPLATES = [
 ];
 
 /* ---- Parser: ASCII grid → runtime template object -------------------------- */
+// Single source of truth for the layout ASCII legend, shared by _parseLayout
+// (char → schema) here and the generator's _renderRows (schema → char) in
+// layout_generator.js so the two directions can never drift. Non-starter
+// glyphs: '.' = floor, '#' or '_' = gap, 'D' = door.
+const LAYOUT_STARTER_CHARS = { stove: 'S', sink: 'K', table: 'T', chair: 'C' };
+const LAYOUT_CHAR_STARTERS = {};
+for (const _t in LAYOUT_STARTER_CHARS) LAYOUT_CHAR_STARTERS[LAYOUT_STARTER_CHARS[_t]] = _t;
+
 function _parseLayout(raw) {
   const { id, name, blurb, rows } = raw;
   const out = {
@@ -187,10 +195,7 @@ function _parseLayout(raw) {
       const c = row[x];
       if      (c === '#' || c === '_') out.gaps.push({ x, y });
       else if (c === 'D') out.doors.push({ x, y });
-      else if (c === 'S') out.starters.push({ type: 'stove', x, y });
-      else if (c === 'K') out.starters.push({ type: 'sink',  x, y });
-      else if (c === 'T') out.starters.push({ type: 'table', x, y });
-      else if (c === 'C') out.starters.push({ type: 'chair', x, y });
+      else if (LAYOUT_CHAR_STARTERS[c]) out.starters.push({ type: LAYOUT_CHAR_STARTERS[c], x, y });
     }
   }
   // Convenience back-compat: `door` = first door.

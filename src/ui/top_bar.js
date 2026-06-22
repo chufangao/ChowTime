@@ -36,6 +36,10 @@ class TopBar {
     // reposition + rebind per refresh.
     this._zonePool = new Map();   // key → zone
     this._textPool = new Map();   // key → text
+    // Reused per-refresh "live key" sets — cleared each refresh rather than
+    // reallocated, since refresh() runs every frame.
+    this._usedTexts = new Set();
+    this._usedZones = new Set();
     this._build();
     manager.topBarRect = { x: 0, y: 0, w: this.W, h: this.height };
   }
@@ -87,8 +91,8 @@ class TopBar {
    *  widths so widgets, launchers, tools, and speed never overlap. Zones
    *  are pooled by key — reused across frames, never destroyed mid-click. */
   refresh(sim) {
-    const usedTexts = new Set();
-    const usedZones = new Set();
+    const usedTexts = this._usedTexts; usedTexts.clear();
+    const usedZones = this._usedZones; usedZones.clear();
     const g = this.dynG;
     if (g && g.clear) g.clear();
 
@@ -113,6 +117,8 @@ class TopBar {
 
     for (const app of [...this.manager.appOrder].reverse()) {
       if (app.hasPanel) continue;
+      // Some map tools (e.g. Add Room) only belong in the bar conditionally.
+      if (typeof app.hiddenInBar === 'function' && app.hiddenInBar(sim)) continue;
       rx -= TOOL_W;
       const active = (this.manager.activeMapToolId === app.id);
       const locked = this.manager.isLockedNow(app);
@@ -260,16 +266,22 @@ class TopBar {
         z.setInteractive({ useHandCursor: true });
       }
     }
-    // Rebind: clear previous listener, attach the new one. Wrap so the
-    // AppManager knows this pointerdown was consumed by a UI Zone — keeps
-    // the scene-level pointerdown from falling through to grid logic. See
-    // AppManager._zoneClickInFlight for the full rationale.
-    if (z.removeAllListeners) z.removeAllListeners('pointerdown');
-    const mgr = this.manager;
-    const wrapped = mgr
-      ? (pointer, localX, localY, evt) => { mgr._zoneClickInFlight = true; onClick(pointer, localX, localY, evt); }
-      : onClick;
-    if (z.on) z.on('pointerdown', wrapped);
+    // The handler closure changes identity every frame (callers pass fresh
+    // arrows), so instead of removing + re-adding the listener each frame
+    // (needless churn, and historically a source of dropped in-flight clicks),
+    // we bind ONE stable listener per zone that reads the latest handler from
+    // z._onClick. Updating that property is a cheap assignment. The wrapper
+    // still flags AppManager._zoneClickInFlight so the scene-level pointerdown
+    // doesn't fall through to grid logic.
+    z._onClick = onClick;
+    if (!z._listenerBound && z.on) {
+      const mgr = this.manager;
+      z.on('pointerdown', (pointer, localX, localY, evt) => {
+        if (mgr) mgr._zoneClickInFlight = true;
+        if (typeof z._onClick === 'function') z._onClick(pointer, localX, localY, evt);
+      });
+      z._listenerBound = true;
+    }
     return z;
   }
 

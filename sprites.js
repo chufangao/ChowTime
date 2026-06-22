@@ -52,15 +52,35 @@ const BOT_MARGIN  = 22;
 // larger wins; the iso grid is then centered horizontally inside.
 const GRID_W_NATURAL = LEFT_MARGIN + ROWS * ISO_TW + COLS * ISO_TW + RIGHT_MARGIN;
 const TOP_BAR_W_MIN  = 1240;
+// GAME_W/GAME_H are the *view* size — canvas backing + initial fit-zoom — and
+// stay sized to the 12×12 restaurant footprint (≈ today) so the default camera
+// frames the restaurant, not the whole enlarged grid.
 const GAME_W = Math.max(GRID_W_NATURAL, TOP_BAR_W_MIN);
-// Recenter the grid horizontally if the canvas is wider than the natural grid.
-const _GRID_PAD_X = Math.floor((GAME_W - GRID_W_NATURAL) / 2);
-const GRID_OX = LEFT_MARGIN + ROWS * ISO_TW + _GRID_PAD_X;
+
+// Iso origin is sized for the FULL grid so every tile (including the far-left
+// expansion column at gx=0, gy=GRID_ROWS-1) maps to a positive screen coord,
+// and growing the grid never shifts an existing footprint tile. gridToScreen /
+// screenToTile share this origin, so the iso inverse stays exact for both
+// restaurant and expansion tiles.
+const GRID_OX = LEFT_MARGIN + GRID_ROWS * ISO_TW;
 const GRID_OY = TOP_BAR_H + TOP_MARGIN + ISO_TH;
 
 const GAME_H_GRID = TOP_BAR_H + TOP_MARGIN + (COLS + ROWS) * ISO_TH + BOT_MARGIN + BOT_H;
 const GAME_H_MIN  = 520;
 const GAME_H = Math.max(GAME_H_GRID, GAME_H_MIN);
+
+// Full-grid iso pixel extent — the world rect the camera can pan/zoom across
+// (Phase 2 camera bounds + floor backdrop fill).
+const GRID_PX_W = LEFT_MARGIN + (GRID_COLS + GRID_ROWS) * ISO_TW + RIGHT_MARGIN;
+const GRID_PX_H = TOP_BAR_H + TOP_MARGIN + (GRID_COLS + GRID_ROWS) * ISO_TH + BOT_MARGIN + BOT_H;
+
+// Screen-space center of the 12×12 restaurant footprint — what the world camera
+// centers on at boot so the default view matches today's framing.
+const RESTAURANT_VIEW_CX = GRID_OX + (((COLS - 1) - (ROWS - 1)) / 2) * ISO_TW;
+const RESTAURANT_VIEW_CY = GRID_OY + (((COLS - 1) + (ROWS - 1)) / 2) * ISO_TH;
+
+// How far past fit-zoom the player may zoom in with the mouse wheel.
+const MAX_ZOOM_MULT = 2.5;
 
 /* ---- Color palettes -------------------------------------------------------- */
 const COLORS = {
@@ -94,7 +114,8 @@ function screenToTile(sx, sy) {
   const ry = (sy - GRID_OY) / ISO_TH;
   const gx = Math.round((rx + ry) / 2);
   const gy = Math.round((ry - rx) / 2);
-  if (gx < 0 || gx >= COLS || gy < 0 || gy >= ROWS) return null;
+  // Bounds use the full allocated grid so expansion tiles are pickable too.
+  if (gx < 0 || gx >= GRID_COLS || gy < 0 || gy >= GRID_ROWS) return null;
   return { x: gx, y: gy };
 }
 
@@ -596,14 +617,55 @@ const Sprites = {
   },
 
   /* ---- Customer (body into g, bubbles/bars into overlay, labels via text) ---- */
+  // Customer is split into three z-ordered passes so the static silhouette
+  // (customerBase) can be baked into a per-appearance RenderTexture by
+  // WorldRenderer, while the animated bits stay per-frame Graphics:
+  //   back  — shadow + scissoring legs (BEHIND the body)
+  //   base  — torso, arms, head, hair, eye-whites, cheeks (the bakeable body)
+  //   front — pupils, mouth, hat, steam, speech/anger/eating overlays, labels
+  // All three recompute bob/stride identically, so base translates uniformly
+  // with bob: baking base at rest (bob=0) and offsetting the baked Sprite by
+  // -bob reproduces a walking body. customer() composes all three in original
+  // order, so the combined output is byte-identical to the pre-split draw (and
+  // is what the non-baked fallback path uses).
   customer(view, c, sx, sy) {
-    const { g, overlay, time, getText } = view;
+    Sprites.customerBack(view, c, sx, sy);
+    Sprites.customerBase(view, c, sx, sy);
+    Sprites.customerFront(view, c, sx, sy);
+  },
+
+  // Stable appearance signature — two customers with the same key share one
+  // baked body texture. Includes only what customerBase reads; hat matters
+  // only insofar as hat===2 hides the hair.
+  customerAppearanceKey(c) {
+    const hair = (c.hasHair && c.hat !== 2) ? c.hairColor : 'none';
+    return `c|${c.bodyColor}|${c.skinColor}|${hair}`;
+  },
+
+  // Vertical walk-bob for an entity. Shared by the live draw and WorldRenderer's
+  // baked-sprite Y offset so the baked body rises in lockstep with its
+  // per-frame legs/face. isEmployee selects the tiredness-aware chef pace.
+  entityBob(e, time, isEmployee) {
+    if (!e.hasPath || !e.hasPath()) return 0;
+    const pace = isEmployee ? (e.tired ? 8.4 : 12) : 12;
+    return Math.abs(Math.sin(time * pace + e.id)) * 1.5;
+  },
+
+  customerBack(view, c, sx, sy) {
+    const { g, time } = view;
     const moving = c.hasPath();
     const stride = moving ? Math.sin(time * 12 + c.id) : 0;
     const bob    = moving ? Math.abs(Math.sin(time * 12 + c.id)) * 1.5 : 0;
-
     // Shadow + legs + shoes
-    const legTopY = Sprites._drawLegsShoes(g, sx, sy, stride, bob, c.pantsColor);
+    Sprites._drawLegsShoes(g, sx, sy, stride, bob, c.pantsColor);
+  },
+
+  customerBase(view, c, sx, sy) {
+    const { g, time } = view;
+    const moving = c.hasPath();
+    const stride = moving ? Math.sin(time * 12 + c.id) : 0;
+    const bob    = moving ? Math.abs(Math.sin(time * 12 + c.id)) * 1.5 : 0;
+    const legTopY = sy - 8 - bob;   // mirrors _drawLegsShoes' return
 
     // Torso
     const torsoH = 13, torsoW = 22;
@@ -629,20 +691,34 @@ const Sprites = {
       g.lineStyle(1.5, COLORS.outline, 1); g.strokePath();
     }
 
-    // Eyes
-    const eyeY = headY + 1, po = 1.4;
+    // Eye whites (pupils are drawn in the front pass so the gaze tracks)
+    const eyeY = headY + 1;
     g.fillStyle(0xffffff, 1);
     g.fillCircle(sx - 4, eyeY, 3.5); g.fillCircle(sx + 4, eyeY, 3.5);
     g.lineStyle(1.2, COLORS.outline, 1);
     g.strokeCircle(sx - 4, eyeY, 3.5); g.strokeCircle(sx + 4, eyeY, 3.5);
+    // Cheeks
+    Sprites._drawCheeks(g, sx, headY);
+  },
+
+  customerFront(view, c, sx, sy) {
+    const { g, overlay, time, getText } = view;
+    const moving = c.hasPath();
+    const bob    = moving ? Math.abs(Math.sin(time * 12 + c.id)) * 1.5 : 0;
+    const legTopY = sy - 8 - bob;
+    const torsoH = 13;
+    const torsoY = legTopY - torsoH + 2;
+    const headR = 13;
+    const headY = torsoY - headR + 3;   // == _drawHeadCheeks' return
+
+    // Pupils
+    const eyeY = headY + 1, po = 1.4;
     g.fillStyle(0x1a1420, 1);
     g.fillCircle(sx - 4 + c.facing.x * po, eyeY + c.facing.y * 0.6, 1.9);
     g.fillCircle(sx + 4 + c.facing.x * po, eyeY + c.facing.y * 0.6, 1.9);
     g.fillStyle(0xffffff, 1);
     g.fillCircle(sx - 4 + c.facing.x * po - 0.5, eyeY - 0.5 + c.facing.y * 0.6, 0.8);
     g.fillCircle(sx + 4 + c.facing.x * po - 0.5, eyeY - 0.5 + c.facing.y * 0.6, 0.8);
-    // Cheeks
-    Sprites._drawCheeks(g, sx, headY);
 
     // Mouth — state dependent
     const angry = c.anger > 70;
@@ -829,17 +905,42 @@ const Sprites = {
   },
 
   /* ---- Employee ---- */
+  // Employee mirrors the customer back/base/front split (see customer above)
+  // so the white-apron body bakes once per skin+hair appearance. The hat
+  // (toque or styled) stays in the front pass with the pupils/carry/sweat so
+  // animated hats keep spinning and z-order over the baked head is preserved.
   employee(view, e, sx, sy) {
-    const { g, time, getText } = view;
+    Sprites.employeeBack(view, e, sx, sy);
+    Sprites.employeeBase(view, e, sx, sy);
+    Sprites.employeeFront(view, e, sx, sy);
+  },
+
+  // Chefs all share the white apron, mustache, eyebrows; only skin + visible
+  // hair vary the baked body.
+  employeeAppearanceKey(e) {
+    const hatIdx = (e.visual && e.visual.hat != null) ? e.visual.hat : 0;
+    const hairHidden = (hatIdx === 0 || hatIdx === 2);
+    const hair = (e.visual && e.visual.hasHair && !hairHidden) ? e.visual.hairColor : 'none';
+    return `e|${e.skinColor}|${hair}`;
+  },
+
+  employeeBack(view, e, sx, sy) {
+    const { g, time } = view;
     const moving = e.hasPath();
-    // Tired chefs walk noticeably slower (fewer stride cycles per sec) — purely
-    // cosmetic, but a cheap readability win when the labels alone aren't enough.
-    const stridePace = e.tired ? 8.4 : 12;      // 12 * 0.7
+    const stridePace = e.tired ? 8.4 : 12;
     const stride = moving ? Math.sin(time * stridePace + e.id) : 0;
     const bob    = moving ? Math.abs(Math.sin(time * stridePace + e.id)) * 1.5 : 0;
-
     // Shadow + legs + shoes (navy pants)
-    const legTopY = Sprites._drawLegsShoes(g, sx, sy, stride, bob, 0x2a4a70);
+    Sprites._drawLegsShoes(g, sx, sy, stride, bob, 0x2a4a70);
+  },
+
+  employeeBase(view, e, sx, sy) {
+    const { g, time } = view;
+    const moving = e.hasPath();
+    const stridePace = e.tired ? 8.4 : 12;
+    const stride = moving ? Math.sin(time * stridePace + e.id) : 0;
+    const bob    = moving ? Math.abs(Math.sin(time * stridePace + e.id)) * 1.5 : 0;
+    const legTopY = sy - 8 - bob;
 
     // Apron torso
     const torsoH = 14, torsoW = 24;
@@ -864,8 +965,7 @@ const Sprites = {
     const headR = 13;
     const headY = Sprites._drawHeadCheeks(g, sx, torsoY, e.skinColor);
 
-    // Hair (if the preset has it and hat won't fully cover). Skip for the
-    // toque and the top hat — they cover the scalp.
+    // Hair (skipped under toque / top hat which cover the scalp)
     const hatIdx = (e.visual && e.visual.hat != null) ? e.visual.hat : 0;
     const hairHidden = (hatIdx === 0 || hatIdx === 2);
     if (e.visual && e.visual.hasHair && !hairHidden) {
@@ -875,8 +975,32 @@ const Sprites = {
       g.lineStyle(1.5, COLORS.outline, 1); g.strokePath();
     }
 
+    // Eye whites (pupils in front) + cheeks + mustache + eyebrows (all static)
+    const eyeY = headY + 1;
+    g.fillStyle(0xffffff, 1);
+    g.fillCircle(sx - 4, eyeY, 3.3); g.fillCircle(sx + 4, eyeY, 3.3);
+    g.lineStyle(1, COLORS.outline, 1);
+    g.strokeCircle(sx - 4, eyeY, 3.3); g.strokeCircle(sx + 4, eyeY, 3.3);
+    Sprites._drawCheeks(g, sx, headY);
+    g.lineStyle(2.5, 0x3a2818, 1);
+    g.beginPath(); g.arc(sx - 3, headY + 6, 3, Math.PI * 0.1, Math.PI * 0.9, false); g.strokePath();
+    g.beginPath(); g.arc(sx + 3, headY + 6, 3, Math.PI * 0.1, Math.PI * 0.9, false); g.strokePath();
+  },
+
+  employeeFront(view, e, sx, sy) {
+    const { g, time, getText } = view;
+    const moving = e.hasPath();
+    const stridePace = e.tired ? 8.4 : 12;
+    const bob = moving ? Math.abs(Math.sin(time * stridePace + e.id)) * 1.5 : 0;
+    const legTopY = sy - 8 - bob;
+    const torsoH = 14;
+    const torsoY = legTopY - torsoH + 2;
+    const headR = 13;
+    const headY = torsoY - headR + 3;
+
+    // Hat — toque (default) or styled; drawn over the baked head.
+    const hatIdx = (e.visual && e.visual.hat != null) ? e.visual.hat : 0;
     if (hatIdx === 0) {
-      // Classic chef toque (band + three puffs) — the default look.
       g.fillStyle(0xf5f5f5, 1);
       g.fillRoundedRect(sx - 10, headY - 14, 20, 6, 2);
       g.lineStyle(2, COLORS.outline, 1);
@@ -889,35 +1013,25 @@ const Sprites = {
       g.strokeCircle(sx + 6, headY - 21, 7.5);
       g.strokeCircle(sx, headY - 25, 7);
     } else {
-      // Reuse the customer hat renderer for non-toque styles. _hat reads
-      // `.hat` + `.hatColor` — we feed it a synthetic object so we don't
-      // have to fork the drawing logic.
       const hatColor = e.visual.hatColor != null
         ? e.visual.hatColor
         : (e.visual.hairColor || 0xd64040);
       Sprites._hat(g, { hat: hatIdx, hatColor }, sx, headY, time);
     }
 
-    // Eyes, cheeks, mustache
+    // Pupils (gaze tracks facing)
     const eyeY = headY + 1;
-    g.fillStyle(0xffffff, 1);
-    g.fillCircle(sx - 4, eyeY, 3.3); g.fillCircle(sx + 4, eyeY, 3.3);
-    g.lineStyle(1, COLORS.outline, 1);
-    g.strokeCircle(sx - 4, eyeY, 3.3); g.strokeCircle(sx + 4, eyeY, 3.3);
     g.fillStyle(0x1a1420, 1);
     g.fillCircle(sx - 4 + e.facing.x * 1.2, eyeY + e.facing.y * 0.5, 1.7);
     g.fillCircle(sx + 4 + e.facing.x * 1.2, eyeY + e.facing.y * 0.5, 1.7);
     g.fillStyle(0xffffff, 1);
     g.fillCircle(sx - 4 + e.facing.x * 1.2 - 0.5, eyeY - 0.5 + e.facing.y * 0.5, 0.7);
     g.fillCircle(sx + 4 + e.facing.x * 1.2 - 0.5, eyeY - 0.5 + e.facing.y * 0.5, 0.7);
-    Sprites._drawCheeks(g, sx, headY);
-    g.lineStyle(2.5, 0x3a2818, 1);
-    g.beginPath(); g.arc(sx - 3, headY + 6, 3, Math.PI * 0.1, Math.PI * 0.9, false); g.strokePath();
-    g.beginPath(); g.arc(sx + 3, headY + 6, 3, Math.PI * 0.1, Math.PI * 0.9, false); g.strokePath();
 
     // Carry (clean plate or dirty plate)
+    const torsoY2 = torsoY;
     if (e.carrying) {
-      const cyP = torsoY + 8, cxP = sx;
+      const cyP = torsoY2 + 8, cxP = sx;
       g.fillStyle(0xffffff, 1); g.fillEllipse(cxP, cyP, 14, 5);
       g.lineStyle(2, COLORS.outline, 1); g.strokeEllipse(cxP, cyP, 14, 5);
       g.fillStyle(FOODS[e.carrying.foodType].color, 1);
@@ -928,7 +1042,7 @@ const Sprites = {
         g.fillCircle(cxP + (i === 0 ? -3 : 3), cyP - 5 - off * 10, 2.2);
       }
     } else if (e.carryingDirty) {
-      const cyP = torsoY + 8, cxP = sx;
+      const cyP = torsoY2 + 8, cxP = sx;
       g.fillStyle(0xa89880, 1); g.fillEllipse(cxP, cyP, 14, 5);
       g.lineStyle(2, COLORS.outline, 1); g.strokeEllipse(cxP, cyP, 14, 5);
       g.fillStyle(0x6a5540, 0.85);
@@ -938,10 +1052,10 @@ const Sprites = {
       g.lineBetween(cxP - 5, cyP + 2, cxP + 5, cyP + 2);
     }
 
-    // Tired: sweat drops drifting up, telegraphs fatigue from a distance.
+    // Tired: sweat drops drifting up.
     if (e.tired) Sprites._tiredSweat(view, e, sx, headY);
 
-    // Name tag is always visible (stacked above the action label).
+    // Name tag + action label (pooled text).
     if (e.name) {
       getText('ename_' + e.id, e.name, sx, headY - 52, {
         fontFamily: 'system-ui', fontSize: '9px',
@@ -1103,6 +1217,53 @@ const Sprites = {
    *
    * Signature mirrors the all-in-one draw functions: (view, b, sx, sy).
    * ========================================================================== */
+
+  /* Overlay redraw gate. Returns { animating, sig } for a building so the
+   * renderer can skip the clear()+redraw of overlays that aren't changing this
+   * frame:
+   *   - `animating` is true when the overlay visibly changes frame-to-frame
+   *     (cooking flame, washing bubbles, progress arc, catapult twang window,
+   *     or the broken-crack pulse — anything time-driven). Such overlays must
+   *     redraw every frame.
+   *   - `sig` is a compact signature of all OTHER (static) state the matching
+   *     *Overlay function reads. When `animating` is false, the renderer
+   *     redraws only when `sig` changes, so a state transition (reserve, plate
+   *     swap, break/repair, twang trailing edge) always triggers exactly one
+   *     redraw to refresh the now-static picture.
+   * This MUST be kept in sync with the *Overlay functions below — any field
+   * one of them reads has to appear here. */
+  buildingOverlayState(b, time) {
+    const broken = b.broken ? 'B' : '';
+    const t = time || 0;
+    switch (b.type) {
+      case 'stove': {
+        const cooking = !!b.cooking;
+        const state = cooking ? 'C' : (b.reservedFor ? 'R' : '_');
+        return { animating: cooking || !!b.broken, sig: 's' + state + broken };
+      }
+      case 'catapult_stove': {
+        const cooking = !!b.cooking;
+        const twang = (t - (b._lastFireAt || -10)) < 0.4;
+        const state = cooking ? 'C' : (b.reservedFor ? 'R' : '_');
+        return { animating: cooking || twang || !!b.broken, sig: 'k' + state + (twang ? 'T' : '') + broken };
+      }
+      case 'table': {
+        const fresh = !!(b.plate && !b.plate.dirty);
+        const state = b.plate ? (b.plate.dirty ? 'D' : 'C') + b.plate.foodType : '_';
+        return { animating: fresh || !!b.broken, sig: 't' + state + broken };
+      }
+      case 'chair':
+        return { animating: !!b.broken, sig: 'c' + broken };
+      case 'sink': {
+        const washing = !!b.washing;
+        const state = washing ? 'W' : (b.reservedFor ? 'R' : '_');
+        return { animating: washing || !!b.broken, sig: 'n' + state + broken };
+      }
+      default:
+        // Unknown/future type: never skip, so a new overlay can't go stale.
+        return { animating: true, sig: 'x' };
+    }
+  },
 
   stoveOverlay(view, b, sx, sy) {
     const { g, time } = view;

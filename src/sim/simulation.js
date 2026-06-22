@@ -24,9 +24,26 @@ function _mergeProfile(base, delta) {
 /* ---- Simulation root ------------------------------------------------------- */
 class Simulation {
   constructor() {
-    this.grid = new Grid(COLS, ROWS);
+    // Allocate the full (enlarged) grid, then seed everything outside the
+    // COLS×ROWS restaurant footprint to 'gap' — the expansion void that
+    // placeRoom() later fills in. The footprint (0..COLS-1, 0..ROWS-1) stays
+    // floor-default exactly as before, so the layout validator / applyLayout /
+    // the coordinate-hardcoded tests are unaffected.
+    this.grid = new Grid(GRID_COLS, GRID_ROWS);
+    this._seedExpansionVoid();
     this.pathfinder = new Pathfinder(this.grid);
+    // Config ids of rooms granted by events, awaiting placement via the Place
+    // Room tool (sim.placeRoom). FIFO; the matching entry is consumed on place.
+    this._pendingRooms = [];
     this.buildings = []; this.customers = []; this.employees = []; this.orders = [];
+    // Derived index over `buildings`, grouped by type, rebuilt on every
+    // place/move/remove/load via _reindexBuildings(). `buildings` stays the
+    // canonical list (iteration, serialization); the index lets the per-tick
+    // hot paths (Employee.findTask, findAvailableChair, chefSpawnPads) skip
+    // full-list type scans. `_chefSpawnPadsCache` is the chef_spawn bucket
+    // pre-sorted by (y, x) for stable 1-based pad numbering.
+    this.buildingsByType = { stove: [], catapult_stove: [], table: [], chair: [], sink: [], chef_spawn: [] };
+    this._chefSpawnPadsCache = [];
     this.time = 0; this.spawnTimer = 1; this.spawnEnabled = true;
     this.trafficMultiplier = 1;
     this.money = CONFIG.startingMoney;
@@ -221,17 +238,45 @@ class Simulation {
   // Chef spawn pads in a stable display order (top-left to bottom-right), so
   // the on-map number labels and the Assign menu agree. Used for the "Pad #N"
   // labels the player sees in both places.
+  // Rebuild the by-type index (and the sorted chef-spawn cache) from the
+  // canonical `buildings` list. O(K), called only on building mutation
+  // (place/move/remove/load) — never per tick — so the hot paths read the
+  // index for free. A type bucket is created lazily for any future type.
+  _reindexBuildings() {
+    const byType = { stove: [], catapult_stove: [], table: [], chair: [], sink: [], chef_spawn: [] };
+    for (const b of this.buildings) {
+      (byType[b.type] || (byType[b.type] = [])).push(b);
+    }
+    this.buildingsByType = byType;
+    this._chefSpawnPadsCache = byType.chef_spawn.slice().sort((a, b) => a.y - b.y || a.x - b.x);
+  }
+
   chefSpawnPads() {
-    return this.buildings
-      .filter(b => b.type === 'chef_spawn')
-      .sort((a, b) => a.y - b.y || a.x - b.x);
+    return this._chefSpawnPadsCache;
   }
 
   // 1-based pad number for the pad at (x,y), or null if none. Matches the order
   // from chefSpawnPads().
   chefSpawnLabelAt(x, y) {
-    const i = this.chefSpawnPads().findIndex(b => b.x === x && b.y === y);
-    return i >= 0 ? i + 1 : null;
+    const pads = this._chefSpawnPadsCache;
+    for (let i = 0; i < pads.length; i++) {
+      if (pads[i].x === x && pads[i].y === y) return i + 1;
+    }
+    return null;
+  }
+
+  // True for coords inside the original restaurant footprint (0..COLS-1,
+  // 0..ROWS-1). Everything else is expansion territory.
+  inFootprint(x, y) { return x >= 0 && x < COLS && y >= 0 && y < ROWS; }
+
+  // Paint every tile outside the restaurant footprint as 'gap' (the expansion
+  // void). Reused by the ctor and replaceLayout's full reset.
+  _seedExpansionVoid() {
+    for (let y = 0; y < this.grid.rows; y++) {
+      for (let x = 0; x < this.grid.cols; x++) {
+        if (!this.inFootprint(x, y)) this.grid.setType(x, y, 'gap');
+      }
+    }
   }
 
   seedDemo() {
@@ -265,14 +310,18 @@ class Simulation {
       if (b && typeof b.onRemoved === 'function') b.onRemoved(this);
     }
     this.buildings.length = 0;
-    // Zap walls, gaps, and the current spawn tiles back to floor — bypassing
-    // the cost-charging player paths.
+    this._reindexBuildings();
+    // Reset the whole grid: the restaurant footprint goes back to floor
+    // (bypassing the cost-charging player paths); everything outside it returns
+    // to the expansion void. Any previously-placed room floors are wiped — a
+    // reroll regenerates the entire restaurant from scratch.
     for (let y = 0; y < this.grid.rows; y++) {
       for (let x = 0; x < this.grid.cols; x++) {
         const t = this.grid.getTile(x, y);
         if (!t) continue;
-        if (t.type === 'wall') { this.grid.setType(x, y, 'floor'); t.wallKind = null; }
-        else if (t.type === 'gap' || t.type === 'spawn') { this.grid.setType(x, y, 'floor'); }
+        if (t.type === 'wall') t.wallKind = null;
+        if (!this.inFootprint(x, y)) { this.grid.setType(x, y, 'gap'); }
+        else if (t.type !== 'floor') { this.grid.setType(x, y, 'floor'); }
       }
     }
     if (typeof applyLayout === 'function') applyLayout(this, layout);
@@ -302,6 +351,7 @@ class Simulation {
     else return { ok: false, reason: 'bad-type' };
     if (!this.grid.placeBuilding(b, x, y)) return { ok: false, reason: 'grid-reject' };
     this.buildings.push(b); b.onPlaced(this);
+    this._reindexBuildings();
     if (useCredit) {
       this.freeBuildCredits.splice(creditIdx, 1);
     } else if (!free && !this.debug) {
@@ -338,6 +388,9 @@ class Simulation {
     // existing instance; it does not allocate.
     this.grid.removeBuildingAt(fx, fy);
     this.grid.placeBuilding(b, tx, ty);
+    // Membership is unchanged (same instance), but a chef_spawn move reorders
+    // the (y,x)-sorted pad cache, so refresh the index.
+    this._reindexBuildings();
     // Chef assignments follow their spawn point when it's relocated.
     if (b.type === 'chef_spawn') {
       for (const e of this.employees) {
@@ -352,6 +405,7 @@ class Simulation {
     const b = this.grid.removeBuildingAt(x, y); if (!b) return false;
     b.onRemoved(this);
     const i = this.buildings.indexOf(b); if (i >= 0) this.buildings.splice(i, 1);
+    this._reindexBuildings();
     // A removed chef spawn point un-assigns any chefs pointing at it — they
     // revert to the default door next morning.
     if (b.type === 'chef_spawn') {
@@ -451,6 +505,61 @@ class Simulation {
     return { ok: true };
   }
 
+  // Validity check for stamping room config `cfg` with its top-left at footprint
+  // anchor (ax, ay). Pure (no mutation). Every cell must map to an in-bounds
+  // 'gap' tile, and at least one cell must be 4-adjacent to existing walkable
+  // floor so the room connects to the restaurant. Drives both placeRoom and the
+  // Place Room tool's hover preview.
+  roomPlacement(cfg, ax, ay) {
+    if (!cfg || !cfg.cells || !cfg.cells.length) return { ok: false, reason: 'no-config' };
+    for (const cell of cfg.cells) {
+      const t = this.grid.getTile(ax + cell.dx, ay + cell.dy);
+      if (!t || t.type !== 'gap') return { ok: false, reason: 'blocked' };
+    }
+    const inRoom = new Set(cfg.cells.map(c => (ay + c.dy) * 1024 + (ax + c.dx)));
+    for (const cell of cfg.cells) {
+      const x = ax + cell.dx, y = ay + cell.dy;
+      for (const nb of this.grid.neighbors4(x, y)) {
+        if (inRoom.has(nb.y * 1024 + nb.x)) continue;
+        if (this.grid.isWalkable(nb.x, nb.y)) return { ok: true };
+      }
+    }
+    return { ok: false, reason: 'disconnected' };
+  }
+
+  // Queue a random room grant for the Place Room tool. Shared by the room-grant
+  // daily event and the debug "Grant Room" action. Returns the sampled config,
+  // or null when no configs are loaded (file:// / load failure).
+  grantRandomRoom() {
+    const configs = (typeof ROOM_CONFIGS !== 'undefined' && ROOM_CONFIGS) || [];
+    if (!configs.length) return null;
+    const cfg = configs[(Math.random() * configs.length) | 0];
+    this._pendingRooms = this._pendingRooms || [];
+    this._pendingRooms.push(cfg.id);
+    return cfg;
+  }
+
+  // Stamp a granted room config into the expansion void at anchor (ax, ay).
+  // Resolves the config by id from ROOM_CONFIGS, validates via roomPlacement,
+  // then floor-first converts every cell to floor (so furniture lands on valid
+  // tiles) and places the furniture free. Consumes the matching _pendingRooms
+  // entry. The new floor + furniture behave exactly like the rest of the
+  // restaurant — the pathfinder and renderers pick them up automatically.
+  placeRoom(configId, ax, ay) {
+    const configs = (typeof ROOM_CONFIGS !== 'undefined' && ROOM_CONFIGS) || [];
+    const cfg = configs.find(c => c.id === configId);
+    if (!cfg) return { ok: false, reason: 'no-config' };
+    const res = this.roomPlacement(cfg, ax, ay);
+    if (!res.ok) return res;
+    for (const cell of cfg.cells) this.grid.setType(ax + cell.dx, ay + cell.dy, 'floor');
+    for (const cell of cfg.cells) {
+      if (cell.furniture) this.placeBuilding(cell.furniture, ax + cell.dx, ay + cell.dy, true);
+    }
+    const pi = (this._pendingRooms || []).indexOf(configId);
+    if (pi >= 0) this._pendingRooms.splice(pi, 1);
+    return { ok: true, cfg };
+  }
+
   // Seeds the demo with two starter chefs. The roster-based path is
   // hireFromRoster — this legacy method is only used by seedDemo.
   hireEmployee(free = false) {
@@ -521,8 +630,8 @@ class Simulation {
   submitOrder(o) { this.orders.push(o); }
 
   findAvailableChair() {
-    for (const b of this.buildings) {
-      if (b.type !== 'chair' || b.occupyingCustomer) continue;
+    for (const b of this.buildingsByType.chair) {
+      if (b.occupyingCustomer) continue;
       const table = b.getAdjacentTable(this.grid);
       if (!table || table.occupyingCustomer || table.plate) continue;
       return b;

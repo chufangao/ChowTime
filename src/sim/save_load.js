@@ -57,22 +57,29 @@ function serializeSim(sim, uiState) {
   // --- Recruit pool (live remaining roster) ---
   const recruitPool = (sim.recruitPool || []).map(p => ({ ...p }));
 
-  // --- Walls (player partitions only) and gaps (default-layout obstacles).
-  // Both are tile state, not Building instances. ---
+  // --- Walls (player partitions only), gaps (default-layout obstacles inside
+  // the restaurant footprint), and expansionFloors (placed-room floor tiles
+  // outside the footprint). All three are tile state, not Building instances.
+  // The expansion void itself isn't serialized — a fresh Simulation re-seeds it
+  // to 'gap' in the ctor, and we only need to replay the room floors carved out
+  // of it. ---
   const walls = [];
   const gaps  = [];
+  const expansionFloors = [];
   for (let y = 0; y < sim.grid.rows; y++) {
     for (let x = 0; x < sim.grid.cols; x++) {
       const t = sim.grid.tiles[y][x];
       if (!t) continue;
+      const inFootprint = (x < COLS && y < ROWS);
       if (t.type === 'wall') walls.push({ x, y, kind: t.wallKind || 'player' });
-      else if (t.type === 'gap') gaps.push({ x, y });
+      else if (t.type === 'gap') { if (inFootprint) gaps.push({ x, y }); }
+      else if (t.type === 'floor' && !inFootprint) expansionFloors.push({ x, y });
     }
   }
 
   // --- Day / run state ---
   const out = {
-    version: 2,
+    version: 3,
     sim: {
       time: sim.time,
       money: sim.money,
@@ -128,7 +135,9 @@ function serializeSim(sim, uiState) {
       trafficMultiplier: sim.trafficMultiplier,
       spawnTiles: (sim.spawnTiles || [sim.spawnTile]).map(d => ({ x: d.x, y: d.y })),
       layoutId: sim.layoutId || null,
-      walls, gaps,
+      walls, gaps, expansionFloors,
+      // Config ids of rooms granted but not yet placed (Place Room tool).
+      pendingRooms: (sim._pendingRooms || []).slice(),
       buildings, employees, recruitPool,
       // No customers, orders, projectiles — saves are at dayEnd.
     },
@@ -138,7 +147,7 @@ function serializeSim(sim, uiState) {
 }
 
 function deserializeSim(json) {
-  if (!json || (json.version !== 1 && json.version !== 2)) throw new Error('Bad save version');
+  if (!json || (json.version !== 1 && json.version !== 2 && json.version !== 3)) throw new Error('Bad save version');
   const data = json.sim;
   const sim = new Simulation();
 
@@ -152,6 +161,7 @@ function deserializeSim(json) {
   }
   // Wipe defaults so we don't double-up demo state.
   sim.buildings.length = 0;
+  if (typeof sim._reindexBuildings === 'function') sim._reindexBuildings();
   sim.employees.length = 0;
   sim.recruitPool.length = 0;
 
@@ -170,6 +180,17 @@ function deserializeSim(json) {
     for (const gp of data.gaps) {
       if (!sim.grid.inBounds(gp.x, gp.y)) continue;
       sim.grid.setType(gp.x, gp.y, 'gap');
+    }
+  }
+
+  // Replay placed-room floors (v3+). The ctor seeded the whole expansion region
+  // to 'gap'; flip the saved room tiles back to floor BEFORE placing buildings
+  // so the room's furniture (which lives outside the footprint) lands on valid
+  // floor rather than being rejected as a gap.
+  if (Array.isArray(data.expansionFloors)) {
+    for (const fl of data.expansionFloors) {
+      if (!sim.grid.inBounds(fl.x, fl.y)) continue;
+      sim.grid.setType(fl.x, fl.y, 'floor');
     }
   }
 
@@ -301,6 +322,7 @@ function deserializeSim(json) {
     sim.middayOutcome = null;
   }
   sim.freeBuildCredits = Array.isArray(data.freeBuildCredits) ? data.freeBuildCredits.slice() : [];
+  sim._pendingRooms    = Array.isArray(data.pendingRooms) ? data.pendingRooms.slice() : [];
   sim.eventHistory     = Array.isArray(data.eventHistory)
     ? data.eventHistory.map(h => ({ ...h }))
     : [];
@@ -316,16 +338,20 @@ function describeSim(sim) {
   // for round-trip parity (count + sorted list, with kind).
   const walls = [];
   const gaps = [];
+  const expansionFloors = [];
   for (let y = 0; y < sim.grid.rows; y++) {
     for (let x = 0; x < sim.grid.cols; x++) {
       const t = sim.grid.tiles[y][x];
       if (!t) continue;
+      const inFootprint = (x < COLS && y < ROWS);
       if (t.type === 'wall') walls.push({ x, y, kind: t.wallKind || 'player' });
-      else if (t.type === 'gap') gaps.push({ x, y });
+      else if (t.type === 'gap') { if (inFootprint) gaps.push({ x, y }); }
+      else if (t.type === 'floor' && !inFootprint) expansionFloors.push({ x, y });
     }
   }
   walls.sort((a, b) => a.x - b.x || a.y - b.y || a.kind.localeCompare(b.kind));
   gaps.sort((a, b) => a.x - b.x || a.y - b.y);
+  expansionFloors.sort((a, b) => a.x - b.x || a.y - b.y);
   const doors = (sim.spawnTiles || (sim.spawnTile ? [sim.spawnTile] : []))
     .map(d => ({ x: d.x, y: d.y }))
     .sort((a, b) => a.x - b.x || a.y - b.y);
@@ -341,7 +367,8 @@ function describeSim(sim) {
     trafficMultiplier: sim.trafficMultiplier,
     layoutId: sim.layoutId || null,
     spawnTiles: doors,
-    walls, gaps,
+    walls, gaps, expansionFloors,
+    pendingRooms: (sim._pendingRooms || []).slice(),
     stats: { ...sim.stats },
     runStats: { ...sim.runStats },
     buildings: sim.buildings.map(b => ({ type: b.type, x: b.x, y: b.y, broken: !!b.broken, facing: b.facing != null ? b.facing : null })).sort((a, b) => a.x - b.x || a.y - b.y || a.type.localeCompare(b.type)),

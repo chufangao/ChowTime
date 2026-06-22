@@ -97,12 +97,33 @@ class SettingsApp extends App {
           sim.eventManager.startMiddayEvent(ev);
         },
       }, used, usedZones);
+      // Grant a room right now (the room-grant event's effect, on demand) so
+      // the player can exercise the Add Room tool without waiting for day 3.
+      this._drawPanelButton('grant_room', r.x + 18, r.y + 238, 372, 30, {
+        label: '🏗 Grant Room', font: 'bold 12px system-ui',
+        fill: 0x3c7e49, color: '#ffffff',
+        radius: 6, shadow: false, border: false,
+        labelX: r.x + 150, labelY: r.y + 245,
+        onClick: () => {
+          if (sim && typeof sim.grantRandomRoom === 'function') sim.grantRandomRoom();
+        },
+      }, used, usedZones);
+      // Toggle the FPS / frame-time overlay (read-only instrumentation; lets us
+      // A/B performance changes). Flips a window flag the scene reads each frame.
+      const perfOn = (typeof window !== 'undefined' && !!window.__chowPerf);
+      this._drawPanelButton('perf', r.x + 18, r.y + 276, 372, 30, {
+        label: perfOn ? '📊 FPS Overlay: ON' : '📊 FPS Overlay: OFF', font: 'bold 12px system-ui',
+        fill: perfOn ? 0x2d6a3c : 0x3d2d5c, color: '#ffffff',
+        radius: 6, shadow: false, border: false,
+        labelX: r.x + 150, labelY: r.y + 283,
+        onClick: () => { if (typeof window !== 'undefined') window.__chowPerf = !window.__chowPerf; },
+      }, used, usedZones);
     }
 
     // --- Save / Load ---
     // Shift down to make room for debug test actions when debug is on. We
     // keep a single y offset so the section doesn't jump as debug toggles.
-    const slY = debugOn ? r.y + 248 : r.y + 160;
+    const slY = debugOn ? r.y + 324 : r.y + 160;
     const canSave = sim && sim.dayState === 'dayEnd';
     this._t(used, 'sl:l', 'Save / Load', r.x + 18, slY, { font: 'bold 14px system-ui', color: '#fff' });
     this._drawPanelButton('save', r.x + 18, slY + 24, 180, 36, {

@@ -31,11 +31,23 @@ class HireApp extends App {
 
   // Mouse wheel scroll: only meaningful in list mode. Step by one row per
   // wheel notch; clamp to [0, maxRow] computed from the live pool.
+  // How many card rows fit in the panel without spilling past its bottom edge.
+  // The panel height scales with the viewport, so a fixed row count overflowed
+  // on shorter screens (the bottom row of chefs ran off the panel). Mirrors the
+  // grid metrics in _renderList: 60px header band above the grid, cardH 96,
+  // rowGap 8, plus a little bottom padding. Capped at 4 so tall screens keep the
+  // original density; the scrollbar covers any overflow beyond what's visible.
+  _visibleRows(r) {
+    const cardH = 96, rowGap = 8, gridTop = 60, bottomPad = 14;
+    const avail = (r ? r.h : 520) - gridTop - bottomPad;
+    return Math.max(1, Math.min(4, Math.floor((avail + rowGap) / (cardH + rowGap))));
+  }
+
   onWheel(p, dy) {
     if (this.mode !== 'list') return;
     const sim = this.manager && this.manager._sim;
     const pool = (sim && sim.recruitPool) || [];
-    const cols = 2, rows = 4;
+    const cols = 2, rows = this._visibleRows(this.panelRect());
     const maxRow = Math.max(0, Math.ceil(pool.length / cols) - rows);
     if (maxRow === 0) return;
     const step = dy > 0 ? 1 : -1;
@@ -68,10 +80,15 @@ class HireApp extends App {
 
   _renderList(sim, r, dg, used) {
     const pool = (sim && sim.recruitPool) || [];
-    const cols = 2, rows = 4;
+    const cols = 2, rows = this._visibleRows(r);
     const cardW = (r.w - 36 - 16) / cols;
     const cardH = 96;
     const gridY = r.y + 60;
+    // Clamp scroll: the visible row count shrinks on shorter panels, so a
+    // scrollRow carried over from a taller layout (or a smaller pool) could
+    // otherwise scroll the grid into empty space.
+    const maxRowClamp = Math.max(0, Math.ceil(pool.length / cols) - rows);
+    if (this.scrollRow > maxRowClamp) this.scrollRow = maxRowClamp;
     const startIdx = this.scrollRow * cols;
 
     if (pool.length === 0) {
@@ -100,8 +117,12 @@ class HireApp extends App {
           dg.lineStyle(1.5, 0x2a1a1a, 0.5);
           dg.strokeRoundedRect(cx + 8, cy + 8, 64, 80, 6);
           // Chef portrait drawn directly on graphics (no text-pool entry).
+          // Center it low in the 64×80 well (cy+8..cy+88): the toque rises ~41px
+          // above the portrait center, so a higher anchor let the hat spill out
+          // the top of the frame. cy+52 seats the whole chef (toque → shoulders)
+          // inside the well.
           if (typeof Sprites !== 'undefined' && Sprites.chefPortrait) {
-            Sprites.chefPortrait(dg, entry, cx + 40, cy + 40);
+            Sprites.chefPortrait(dg, entry, cx + 40, cy + 52);
           }
         }
         const tx = cx + 80;       // text starts to the right of the portrait

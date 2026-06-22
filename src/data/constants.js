@@ -2,9 +2,17 @@
  * data/constants.js — grid dimensions, food menu, gameplay tuning, pure helpers
  * ============================================================================ */
 
-/* ---- Grid dimensions ------------------------------------------------------- */
+/* ---- Grid dimensions -------------------------------------------------------
+ * COLS/ROWS are the *restaurant footprint* — the layout templates, validator,
+ * and applyLayout all stay bound to this 12×12 box at the grid origin.
+ * GRID_COLS/GRID_ROWS are the *allocated grid size*: the footprint plus the
+ * expansion void to its right/bottom. Simulation seeds every tile outside the
+ * footprint to 'gap'; room-grant events convert those gaps to floor, growing
+ * the playable map beyond the starting restaurant. */
 const COLS = 12;
 const ROWS = 12;
+const GRID_COLS = 24;
+const GRID_ROWS = 24;
 
 /* ---- Food menu (gameplay + a bit of display info) -------------------------- */
 const FOODS = {

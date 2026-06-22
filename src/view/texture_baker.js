@@ -190,6 +190,40 @@ const TextureBaker = (() => {
     }
   }
 
+  // --- Characters (baked on demand, one texture per appearance) -------------
+  // Customers/employees can't be baked up front (too many body×skin×hair
+  // combos), but each *static silhouette* (Sprites.customerBase / employeeBase
+  // — torso, head, hair, eye-whites, no legs/face/hat) is appearance-stable, so
+  // WorldRenderer bakes it the first time an appearance is seen and reuses the
+  // texture forever after. Box is taller-than-wide to fit the head + hair above
+  // the footprint; legs/overlays render as live Graphics around the sprite.
+  const CHAR_W = 48;
+  const CHAR_H = 64;
+  const CHAR_AX = CHAR_W / 2;    // 24 — horizontally centered footprint
+  const CHAR_AY = 56;           // footprint sits low; ~56px of headroom above
+
+  // Bake a character base. drawFn(stubView, ax, ay) should call e.g.
+  // Sprites.customerBase with a neutral (non-walking) stub so bob/stride are 0.
+  function bakeCharacter(scene, key, drawFn) {
+    if (scene.textures.exists(key)) return true;
+    const g = scene.make.graphics({ x: 0, y: 0, add: false });
+    try {
+      if (typeof g.scale === 'object' && g.scale) g.scale.set(BAKE_SCALE, BAKE_SCALE);
+      else if (typeof g.setScale === 'function') g.setScale(BAKE_SCALE);
+      drawFn(_stubView(g), CHAR_AX, CHAR_AY);
+      g.generateTexture(key, CHAR_W * BAKE_SCALE, CHAR_H * BAKE_SCALE);
+      return true;
+    } catch (err) {
+      console.error('[TextureBaker] character bake failed for', key, err);
+      return false;
+    } finally {
+      g.destroy();
+    }
+  }
+
+  // Anchor + display scale for baked character sprites (see getAnchor).
+  function getCharAnchor() { return { sx: CHAR_AX, sy: CHAR_AY, w: CHAR_W, h: CHAR_H }; }
+
   // Origin for tile sprites so setPosition(sx, sy) places the diamond center
   // at (sx, sy). FloorRenderer reads this. w/h are in LOGICAL pixels; the
   // baked texture is BAKE_SCALE× larger and renderers compensate via
@@ -215,5 +249,5 @@ const TextureBaker = (() => {
     return 1 / BAKE_SCALE;
   }
 
-  return { bakeAll, getAnchor, getTileAnchor, getDisplayScale };
+  return { bakeAll, getAnchor, getTileAnchor, getDisplayScale, bakeCharacter, getCharAnchor };
 })();

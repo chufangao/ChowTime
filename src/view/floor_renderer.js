@@ -44,18 +44,17 @@ const FloorRenderer = (() => {
     }
   }
 
-  function _tileKey(t) {
+  // Returns the texture key for a tile, or null to render NOTHING (the static
+  // dark backdrop shows through). The expansion void — 'gap' tiles outside the
+  // COLS×ROWS restaurant footprint — is skipped so it reads as empty space
+  // rather than an in-restaurant 'floor_gap' hole. In-footprint gaps still get
+  // the hole texture.
+  function _resolveKey(t, x, y) {
+    if (t && t.type === 'gap' && (x >= COLS || y >= ROWS)) return null;
     if (!t) return 'floor_a';
     if (t.type === 'gap')   return 'floor_gap';
     if (t.type === 'spawn') return 'floor_spawn';
-    // Default floor uses an A/B checker by tile parity. Computed at the
-    // call site (we need x+y) — caller passes the resolved key.
-    return null; // sentinel: caller must compute parity-aware key
-  }
-
-  function _resolveKey(t, x, y) {
-    const k = _tileKey(t);
-    if (k) return k;
+    // Default floor uses an A/B checker by tile parity.
     return ((x + y) & 1) ? 'floor_a' : 'floor_b';
   }
 
@@ -96,9 +95,17 @@ const FloorRenderer = (() => {
       for (let x = 0; x < cols; x++) {
         const t = sim.grid.tiles[y][x];
         const key = _resolveKey(t, x, y);
+        if (key === null) {
+          // Expansion void: ensure no tile sprite is shown here.
+          const s0 = _sprites[y][x];
+          if (s0 && s0.setVisible) s0.setVisible(false);
+          _painted[y][x] = null;
+          continue;
+        }
         if (!force && _painted[y][x] === key && _sprites[y][x]) continue;
         const { sx, sy } = gridToScreen(x, y);
         let s = _sprites[y][x];
+        if (s && s.setVisible) s.setVisible(true);
         if (!s) {
           if (!_scene.textures.exists(key)) {
             // Texture missing — leave the cell empty. The static gFloor

@@ -134,11 +134,21 @@ const CUSTOMER_ABILITY_ROLL = [
   { id: 'patient',      weight: 0.8 },
 ];
 
+// Resolved-ability cache. `abilityMult`/`abilitySum`/`fireAbilityHook` are
+// called several times per entity per frame, so rebuilding the resolved
+// array each call is pure churn. Memoize on the entity, keyed by the
+// `abilities` array reference: it's `.slice()`'d once at construction (stable
+// ref) and only ever reassigned — never mutated in place — so a ref compare
+// is a safe invalidation signal. Entities without an `abilities` array (or a
+// frozen literal we can't annotate) fall back to a fresh resolve.
+const _EMPTY_ABILITIES = [];
 function abilitiesOf(entity) {
   const ids = entity && entity.abilities;
-  if (!ids || !ids.length) return [];
+  if (!ids || !ids.length) return _EMPTY_ABILITIES;
+  if (entity._abIds === ids) return entity._abObjs;
   const out = [];
   for (const id of ids) { const a = ABILITIES[id]; if (a) out.push(a); }
+  try { entity._abIds = ids; entity._abObjs = out; } catch (e) { /* non-extensible entity: skip cache */ }
   return out;
 }
 function abilityMult(entity, prop, ...args) {

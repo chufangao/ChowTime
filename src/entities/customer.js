@@ -195,9 +195,8 @@ class Customer extends Entity {
     if (!chair) return;
     const startX = Math.round(this.x), startY = Math.round(this.y);
     if (!sim.grid.inBounds(startX, startY)) return;
-    const path = sim.pathfinder.findPath(
-      startX, startY,
-      (x, y) => x === chair.x && y === chair.y,
+    const path = sim.pathfinder.findPathToTargets(
+      startX, startY, [{ x: chair.x, y: chair.y }],
       (x, y) => sim.grid.isWalkable(x, y));
     if (!path) return;
     // Snap to tile so stepMovement starts cleanly.
@@ -252,9 +251,8 @@ class Customer extends Entity {
       (Math.abs(b.x - here.x) + Math.abs(b.y - here.y)));
     let routed = false;
     for (const exit of doors) {
-      const path = sim.pathfinder.findPath(
-        here.x, here.y,
-        (x, y) => x === exit.x && y === exit.y,
+      const path = sim.pathfinder.findPathToTargets(
+        here.x, here.y, [{ x: exit.x, y: exit.y }],
         (x, y) => sim.grid.isWalkable(x, y));
       if (path) { this.setPath(path); routed = true; break; }
     }

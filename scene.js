@@ -23,11 +23,12 @@
 // signature compare would be pure waste. The per-tile floor diamonds + door
 // overlays live on FloorRenderer's Layer instead.
 function _drawFloorBackdrop(g) {
-  g.fillStyle(0x1a1428, 1);
-  g.fillRect(0, 0, GAME_W, TOP_BAR_H);
-  g.fillRect(0, GAME_H - BOT_H, GAME_W, BOT_H);
+  // Fill the entire (enlarged) world rect with the dark floor backdrop so the
+  // movable camera never reveals a hard edge as it pans/zooms across the
+  // expansion area. The TopBar (on the fixed UI camera) paints its own opaque
+  // strip over the top, so we no longer need the separate header band here.
   g.fillStyle(0x231a30, 1);
-  g.fillRect(0, TOP_BAR_H, GAME_W, GAME_H - TOP_BAR_H - BOT_H);
+  g.fillRect(0, 0, GRID_PX_W, GRID_PX_H);
 }
 
 
@@ -127,41 +128,151 @@ class GameScene extends Phaser.Scene {
     this.input.mouse.disableContextMenu();
     this.input.on('pointermove', p => this._onPointerMove(p));
     this.input.on('pointerdown', p => this._onPointerDown(p));
-    this.input.on('wheel', (p, _go, _dx, dy) => this.appManager.forwardWheel(p, dy));
+    // Wheel: an open panel's scroll wins; otherwise zoom the world toward the
+    // cursor. forwardWheel gets the UI-cam world point so panel hit-tests match.
+    this.input.on('wheel', (p, _go, _dx, dy) => {
+      const up = this._uiPoint(p);
+      if (this.appManager.forwardWheel({ worldX: up.x, worldY: up.y, x: p.x, y: p.y }, dy)) return;
+      this._zoomAtPointer(p, dy);
+    });
     this.input.keyboard.on('keydown', e => this._onKey(e));
 
     // Pixel-perfect canvas: the backing-store is sized at viewport CSS × DPR
-    // (clamped to MAX_BACKING) in startChowTime. Here we scale the world to
-    // fill it. With cam zoom = camZoom and centerOn(GAME_W/2, GAME_H/2),
-    // world (0,0) → canvas (0,0) and world (GAME_W, GAME_H) → canvas
-    // (backW, backH) — pointer worldX/Y stays in logical coords for the rest
-    // of the game.
+    // (clamped to MAX_BACKING) in startChowTime. The fit-zoom (camZoom) scales
+    // the GAME_W × GAME_H footprint view up to fill it.
     const size = (typeof window !== 'undefined' && window.__chowTimeSize) || null;
     const camZoom = (size && size.camZoom) || 1;
-    this.cameras.main.setZoom(camZoom);
-    this.cameras.main.centerOn(GAME_W / 2, GAME_H / 2);
+    this._setupCameras(camZoom);
 
-    // Text resolution: glyph atlas is rasterised at fontSize × resolution.
-    // The atlas then renders at fontSize in world coords, which the camera
-    // magnifies by camZoom on its way to the canvas. So to land 1 atlas
-    // pixel on 1 canvas pixel we need resolution ≥ camZoom. (Sprites avoid
-    // this via TextureBaker's 2× bake; text does not, which is why the
-    // figures looked sharp while glyphs were still blurry.) Cap at 4 for
-    // texture memory.
-    this._textResolution = Math.max(1, Math.min(4, Math.ceil(camZoom)));
+    // Text resolution: glyph atlas is rasterised at fontSize × resolution, then
+    // rendered at fontSize in world coords which the world camera magnifies by
+    // up to fitZoom × MAX_ZOOM_MULT on its way to the canvas. Rasterise for that
+    // max so pooled WORLD text stays crisp when the player zooms all the way in
+    // (cheap, set once — no per-frame churn). Cap at 4 for texture memory. HUD
+    // text rides the fixed UI camera, so it's already covered by the fit zoom.
+    this._textResolution = Math.max(1, Math.min(4, Math.ceil(camZoom * MAX_ZOOM_MULT)));
+
+    // WASD / arrow-key pan. The keydown→appManager.onKey path only consumes
+    // Escape, so these don't conflict. Read each frame in update().
+    if (this.input && this.input.keyboard && this.input.keyboard.addKeys) {
+      this._panKeys = this.input.keyboard.addKeys('W,A,S,D,UP,DOWN,LEFT,RIGHT');
+    }
 
     // Launch the parallel HUD scene. It's empty today (see src/scenes/ui_scene.js)
     // but starting it now means future phases can move TopBar/widgets there
     // without touching the Phaser.Game config.
     if (!this.scene.isActive('ui')) this.scene.launch('ui');
 
-    // Expose camera handles on window for ad-hoc zoom/pan. The viewport is
-    // currently a fixed GAME_W × GAME_H but Phaser's camera already supports
-    // setZoom/scrollX/Y — wiring it now means future "big map" features
-    // (Phase 7 in the migration plan) cost no additional scene plumbing.
+    // Expose camera handles on window for ad-hoc zoom/pan / debugging.
     if (typeof window !== 'undefined') {
       window.gameZoom = (z) => { this.cameras.main.setZoom(z); };
       window.gamePan  = (x, y) => { this.cameras.main.setScroll(x | 0, y | 0); };
+    }
+
+    // Partition existing objects across the two cameras before the first render
+    // so the HUD never flashes on the world camera (or vice-versa). update()
+    // re-runs this each frame to catch lazily-created objects.
+    this._partitionCameras();
+  }
+
+  /* ---- Cameras: movable world cam + fixed UI cam ----
+   * cameras.main is the WORLD camera (wheel-zoom + WASD/arrow pan, clamped to
+   * the full grid). this.uiCam reproduces today's fixed transform and carries
+   * the HUD (TopBar + app panels), so panning/zooming the world leaves the HUD
+   * put. Objects are split between the two via _partitionCameras() by depth:
+   * world layers/graphics/text (depth < 500) render only on the world cam; HUD
+   * (depth ≥ 900) renders only on the UI cam. */
+  _setupCameras(fitZoom) {
+    this._fitZoom = fitZoom || 1;
+    this._userZoomMult = 1;
+    const world = this.cameras && this.cameras.main;
+    if (!world) return;
+    world.setZoom(this._fitZoom);
+    // Bounds = the full grid pixel extent; Phaser then clamps pan/zoom so the
+    // camera can't fly off into empty space.
+    if (world.setBounds) world.setBounds(0, 0, GRID_PX_W, GRID_PX_H);
+    world.centerOn(RESTAURANT_VIEW_CX, RESTAURANT_VIEW_CY);
+
+    // Fixed UI camera == today's single camera (zoom = fit, centered on the
+    // GAME_W × GAME_H footprint view). The HUD is laid out in that logical
+    // space, so its math is unchanged — we just feed it the UI-cam world point
+    // for hit-tests.
+    if (this.cameras.add) {
+      this.uiCam = this.cameras.add(0, 0, world.width, world.height, false, 'ui');
+      this.uiCam.setZoom(this._fitZoom);
+      this.uiCam.centerOn(GAME_W / 2, GAME_H / 2);
+    }
+  }
+
+  /** Zoom the world camera toward the cursor. Keeps the world point under the
+   *  pointer fixed by adjusting scroll for the zoom delta. */
+  _zoomAtPointer(p, dy) {
+    const cam = this.cameras && this.cameras.main;
+    if (!cam) return;
+    const before = cam.getWorldPoint(p.x, p.y);
+    const factor = dy > 0 ? 0.9 : 1.1;
+    const mult = Math.max(1, Math.min(MAX_ZOOM_MULT, this._userZoomMult * factor));
+    if (mult === this._userZoomMult) return;
+    this._userZoomMult = mult;
+    cam.setZoom(this._fitZoom * mult);
+    const after = cam.getWorldPoint(p.x, p.y);
+    cam.scrollX += before.x - after.x;
+    cam.scrollY += before.y - after.y;
+  }
+
+  /** WASD / arrow-key pan, read each frame. Pan speed is constant in screen
+   *  space (divided by zoom) so it feels the same at every zoom level. */
+  _handleCameraPan(dtMs) {
+    const cam = this.cameras && this.cameras.main;
+    const k = this._panKeys;
+    if (!cam || !k) return;
+    const dt = Math.min(dtMs || 16, 100) / 1000;
+    const speed = 700;   // logical px/sec at fit zoom
+    let dx = 0, dy = 0;
+    if ((k.A && k.A.isDown) || (k.LEFT && k.LEFT.isDown))  dx -= 1;
+    if ((k.D && k.D.isDown) || (k.RIGHT && k.RIGHT.isDown)) dx += 1;
+    if ((k.W && k.W.isDown) || (k.UP && k.UP.isDown))      dy -= 1;
+    if ((k.S && k.S.isDown) || (k.DOWN && k.DOWN.isDown))  dy += 1;
+    if (!dx && !dy) return;
+    const step = speed * dt / (cam.zoom || 1);
+    cam.scrollX += dx * step;
+    cam.scrollY += dy * step;
+  }
+
+  /** Assign every not-yet-assigned top-level object to exactly one camera so
+   *  the HUD stays on the UI cam and the world stays on the world cam. Depth is
+   *  the discriminator: world objects are ≤ 310, HUD objects are ≥ 900. */
+  _partitionCameras() {
+    const world = this.cameras && this.cameras.main;
+    const ui = this.uiCam;
+    if (!world || !ui) return;
+    const list = this.children && this.children.list;
+    if (!list) return;
+    for (let i = 0; i < list.length; i++) {
+      const obj = list[i];
+      if (!obj || obj.__camAssigned) continue;
+      obj.__camAssigned = true;
+      const d = obj.depth || 0;
+      if (d >= 500) { if (world.ignore) world.ignore(obj); }   // HUD → UI cam only
+      else          { if (ui.ignore)    ui.ignore(obj); }      // world → world cam only
+    }
+  }
+
+  /** Re-apply camera framing after a viewport resize. Recomputes fit-zoom and
+   *  keeps the user's zoom multiplier + current pan (bounds re-clamp the
+   *  scroll); the UI cam re-centers on the footprint view. */
+  onResize(size) {
+    if (!size) return;
+    this._fitZoom = size.camZoom || 1;
+    const world = this.cameras && this.cameras.main;
+    if (world) {
+      if (world.setSize) world.setSize(size.backW, size.backH);
+      world.setZoom(this._fitZoom * (this._userZoomMult || 1));
+    }
+    if (this.uiCam) {
+      if (this.uiCam.setSize) this.uiCam.setSize(size.backW, size.backH);
+      this.uiCam.setZoom(this._fitZoom);
+      this.uiCam.centerOn(GAME_W / 2, GAME_H / 2);
     }
   }
 
@@ -180,6 +291,8 @@ class GameScene extends Phaser.Scene {
     this.appManager.register(new RepairApp());
     this.appManager.register(new RotateApp());
     this.appManager.register(new AssignApp());
+    // Place Room: hidden from the bar until a room grant is pending.
+    if (typeof PlaceRoomApp === 'function') this.appManager.register(new PlaceRoomApp());
     // Hidden panel (no launcher) opened by the Assign tool to pick chefs.
     this.appManager.register(new AssignPickerApp());
     // Between-day surfaces. DayEndApp renders the wrap-up / event resolution
@@ -200,8 +313,11 @@ class GameScene extends Phaser.Scene {
 
   /* ---- Per-frame update ---- */
   update(_, dtMs) {
+    const perf = (typeof window !== 'undefined' && window.__chowPerf) ? window.performance : null;
+    const t0 = perf ? perf.now() : 0;
     const dt = Math.min(dtMs / 1000, 0.1) * (this.sim._uiSpeed || 1);
     this.sim.update(dt);
+    const tSim = perf ? perf.now() : 0;
     this._frame++;
 
     // Layout edits during a shift: clear active map-tool / build placement so
@@ -229,27 +345,73 @@ class GameScene extends Phaser.Scene {
       this._floorPaintedVer = ver;
     }
 
+    this._handleCameraPan(dtMs);
+
     this._drawScene();
     this.appManager.update(this.sim);
     this.topBar.refresh(this.sim);
     this._cullTexts();
+    // Catch objects created this frame (pooled world/HUD text, app panels,
+    // newly-placed-room floor sprites) so each lands on exactly one camera.
+    this._partitionCameras();
+
+    if (perf) this._updatePerfOverlay(perf, t0, tSim, perf.now(), dtMs);
+  }
+
+  /* ---- FPS / frame-time overlay (debug; toggled via window.__chowPerf) ----
+   * Tracks rolling averages of total frame-ms, sim-ms (sim.update), and
+   * draw-ms (everything else) so we can A/B optimizations. Rendered through the
+   * pooled-text path at depth 970 so _partitionCameras routes it to the fixed
+   * UI camera — it stays put under world pan/zoom. Read-only instrumentation;
+   * costs nothing unless the flag is on. */
+  _updatePerfOverlay(perf, t0, tSim, t1, dtMs) {
+    const a = this._perf || (this._perf = { frame: 0, sim: 0, draw: 0, fps: 0, n: 0 });
+    const frameMs = t1 - t0, simMs = tSim - t0, drawMs = t1 - tSim;
+    const k = a.n < 60 ? (a.n + 1) : 60;     // warm-up then fixed 60-frame window
+    a.n = k;
+    a.frame += (frameMs - a.frame) / k;
+    a.sim   += (simMs  - a.sim)   / k;
+    a.draw  += (drawMs - a.draw)  / k;
+    const instFps = dtMs > 0 ? 1000 / dtMs : 0;
+    a.fps += (instFps - a.fps) / k;
+    const counts = `c${this.sim.customers.length} e${this.sim.employees.length} b${this.sim.buildings.length}`;
+    const txt = `${a.fps.toFixed(0)} fps  ${a.frame.toFixed(1)}ms (sim ${a.sim.toFixed(1)} / draw ${a.draw.toFixed(1)})  ${counts}`;
+    const t = this._getText('__perf', txt, 8, GAME_H - 10, {
+      fontFamily: 'monospace', fontSize: '12px', color: '#7CFC00',
+      stroke: '#000000', strokeThickness: 3,
+    });
+    if (t.setOrigin) t.setOrigin(0, 1);
+    if (t.setDepth) t.setDepth(970);   // ≥500 → UI camera (fixed), above the HUD
   }
 
   /* ---- Input routing ----
-   * Pointer coords: with the pixel-perfect canvas, the world is rendered via
-   * camera zoom, so p.x/p.y are screen-space (canvas pixels). All hit-tests
-   * here (screenToTile, panel rects, top bar rect) are in logical world
-   * coords, so we route everything through p.worldX/p.worldY which Phaser
-   * pre-inverts through the camera matrix. */
+   * Two cameras share the canvas, so p.worldX/Y (which Phaser derives from a
+   * single camera) is ambiguous. We compute both points explicitly: the WORLD
+   * point (cameras.main) drives screenToTile picking, and the UI point (uiCam,
+   * == today's fixed transform) drives panel / top-bar hit-tests. p.x/p.y are
+   * canvas pixels, which getWorldPoint expects. */
+  _worldPoint(p) {
+    const cam = this.cameras && this.cameras.main;
+    if (cam && cam.getWorldPoint) { const w = cam.getWorldPoint(p.x, p.y); return { x: w.x, y: w.y }; }
+    return { x: p.worldX, y: p.worldY };
+  }
+  _uiPoint(p) {
+    if (this.uiCam && this.uiCam.getWorldPoint) { const w = this.uiCam.getWorldPoint(p.x, p.y); return { x: w.x, y: w.y }; }
+    return { x: p.worldX, y: p.worldY };
+  }
+
   _onPointerMove(p) {
-    if (this.appManager.consumesPointer(p)) { this.hover = null; return; }
-    const tile = screenToTile(p.worldX, p.worldY);
+    const up = this._uiPoint(p);
+    if (this.appManager.consumesPointer({ worldX: up.x, worldY: up.y })) { this.hover = null; return; }
+    const wp = this._worldPoint(p);
+    const tile = screenToTile(wp.x, wp.y);
     if (!tile) { this.hover = null; return; }
     this.hover = { x: tile.x, y: tile.y, valid: this._previewValidAt(tile.x, tile.y) };
   }
 
   _onPointerDown(p) {
-    if (this.appManager.consumesPointer(p)) {
+    const up = this._uiPoint(p);
+    if (this.appManager.consumesPointer({ worldX: up.x, worldY: up.y })) {
       // Zone consumed this event — clear the flag so the NEXT pointerdown
       // starts fresh. (consumesPointer also returns true based on rect
       // hit-tests, so this clear is harmless when no Zone fired.)
@@ -264,7 +426,8 @@ class GameScene extends Phaser.Scene {
       const app = this.appManager.get(this.appManager.activeAppId);
       if (app && app.hasPanel && !app.isModal) { this.appManager.close(); return; }
     }
-    const tile = screenToTile(p.worldX, p.worldY); if (!tile) return;
+    const wp = this._worldPoint(p);
+    const tile = screenToTile(wp.x, wp.y); if (!tile) return;
 
     const editingAllowed = !this.sim.isDayActive() || this.sim.debug;
 
@@ -412,12 +575,43 @@ class GameScene extends Phaser.Scene {
       }
     }
 
+    // Place-Room ghost: the full furnished room footprint following the cursor.
+    // A floor diamond per cell (tinted by whole-room validity) plus a furniture
+    // preview on the furnished cells, so the player sees exactly what will land.
+    const roomTool = this.appManager.get('place_room');
+    const roomGhostShown = this.appManager.activeMapToolId === 'place_room'
+      && roomTool && this.hover && typeof ROOM_CONFIGS !== 'undefined';
+    if (roomGhostShown) {
+      const cfg = ROOM_CONFIGS.find(c => c.id === roomTool.configId);
+      if (cfg) {
+        const ok = this.hover.valid;
+        const fill   = ok ? 0x6bcf7f : 0xff4d4d;
+        const stroke = ok ? 0x3ca35c : 0xa63030;
+        // Floor diamonds first (under the furniture).
+        for (const cell of cfg.cells) {
+          const { sx, sy } = gridToScreen(this.hover.x + cell.dx, this.hover.y + cell.dy);
+          drawDiamond(this.gGhost, sx, sy, ISO_TW - 2, ISO_TH - 1, fill, stroke, 2, 0.30, 0.9);
+        }
+        // Furniture previews stamped on their cells.
+        for (const cell of cfg.cells) {
+          if (!cell.furniture) continue;
+          const previewB = this._buildPreviewBuilding(cell.furniture);
+          if (!previewB) continue;
+          previewB.cooking = null; previewB.washing = null;
+          previewB.plate = null;   previewB.broken = false;
+          const { sx, sy } = gridToScreen(this.hover.x + cell.dx, this.hover.y + cell.dy);
+          const facing = cell.furniture === 'chair' ? this._roomCellChairFacing(cfg, cell) : null;
+          this._drawBuildingSprite(ghostView, previewB, sx, sy, { facing });
+        }
+      }
+    }
+
     // Plain hover diamond — used when no ghost is shown (map tools other than
-    // move, or build placing a non-building item like floor / player wall).
+    // move/place_room, or build placing a non-building item like floor / wall).
     const showHover = this.hover && (
       this.appManager.activeMapToolId ||
       (this.appManager.get('build') && this.appManager.get('build').activeItem)
-    ) && !moveGhostShown && !buildGhostShown;
+    ) && !moveGhostShown && !buildGhostShown && !roomGhostShown;
     if (showHover) {
       const { sx, sy } = gridToScreen(this.hover.x, this.hover.y);
       Sprites.hoverDiamond(view, sx, sy, this.hover.valid);
@@ -508,6 +702,18 @@ class GameScene extends Phaser.Scene {
     return null;
   }
 
+  /** Facing index (0=N,1=E,2=S,3=W) toward an adjacent table cell within a room
+   *  config, so a chair in the room ghost orients the same way it will once
+   *  placed (Sprites.chair auto-detects the real table after placement). */
+  _roomCellChairFacing(cfg, cell) {
+    const offs = [[0, -1], [1, 0], [0, 1], [-1, 0]];
+    for (let i = 0; i < 4; i++) {
+      const tx = cell.dx + offs[i][0], ty = cell.dy + offs[i][1];
+      if (cfg.cells.some(c => c.dx === tx && c.dy === ty && c.furniture === 'table')) return i;
+    }
+    return null;
+  }
+
   /** Dispatch a Sprites.* call for the given building type. Mirrors the
    *  switch inside _drawScene's y-sort pass but takes an explicit view +
    *  position so ghost rendering can reuse it. */
@@ -588,8 +794,38 @@ function _computeCanvasSize() {
   return { dpr, cssW, cssH, backW, backH, camZoom };
 }
 
+// Daily seed: replace Math.random with a deterministic mulberry32 PRNG seeded
+// from the current calendar day, so every run on the same day plays out
+// identically (same layout, events, abilities, spawns) — a Wordle-style daily
+// seed. All game randomness funnels through Math.random, so overriding it once
+// at boot covers everything (the headless test suite seeds Math.random its own
+// way in test/harness.js, so this browser-only path doesn't affect tests).
+// An explicit window.__chowSeed (number) overrides the date — handy for sharing
+// or reproducing a specific run.
+function _seedRandomFromDate() {
+  let seed;
+  if (typeof window !== 'undefined' && Number.isFinite(window.__chowSeed)) {
+    seed = window.__chowSeed >>> 0;
+  } else {
+    const d = new Date();   // local calendar day
+    seed = (d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate()) >>> 0;
+  }
+  let s = seed || 1;
+  Math.random = function () {
+    s = (s + 0x6D2B79F5) >>> 0;
+    let t = s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  if (typeof window !== 'undefined') window.__chowActiveSeed = seed;
+};
+
 window.startChowTime = function (opts) {
   if (window.__chowTimeInstance) return window.__chowTimeInstance;
+  // Seed all randomness from today's date BEFORE the sim/Phaser are created so
+  // the entire run (and Phaser's own RNG usage) is deterministic for the day.
+  _seedRandomFromDate();
   // Stash opts on window — GameScene.create reads them. This avoids the
   // gotcha of trying to pass per-instance data through the Phaser.Scene ctor.
   window.__chowTimeInitOpts = opts || {};
@@ -641,11 +877,15 @@ window.startChowTime = function (opts) {
         game.canvas.style.width  = next.cssW + 'px';
         game.canvas.style.height = next.cssH + 'px';
       }
-      // Re-apply zoom + center on every active scene's main camera.
+      // Re-apply framing on every active scene. GameScene owns dual-camera
+      // logic (world cam keeps the user's pan/zoom; UI cam re-centers), so we
+      // delegate to its onResize when present and fall back to the simple
+      // single-camera reset for the (empty) UIScene.
       const scenes = (game.scene && game.scene.scenes) || [];
       for (const s of scenes) {
         if (!s || !s.cameras || !s.cameras.main) continue;
         if (s.sys && s.sys.settings && s.sys.settings.active === false) continue;
+        if (typeof s.onResize === 'function') { s.onResize(next); continue; }
         s.cameras.main.setZoom(next.camZoom);
         s.cameras.main.centerOn(GAME_W / 2, GAME_H / 2);
       }

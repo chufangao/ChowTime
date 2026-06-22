@@ -63,7 +63,7 @@ test('save/load round-trip preserves describe-equivalent state', () => {
   const json = ctx.serializeSim(sim1, { activeAppId: 'day_end' });
   // JSON-safe round-trip
   const blob = JSON.parse(JSON.stringify(json));
-  assert.equal(blob.version, 2);
+  assert.equal(blob.version, 3);
   // sim2 must be built in the SAME ctx so deserialize finds Simulation/Employee.
   const { sim: sim2, uiState } = ctx.deserializeSim(blob);
   assert.deepEqual(uiState, { activeAppId: 'day_end' });

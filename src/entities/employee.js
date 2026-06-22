@@ -80,9 +80,13 @@ class Employee extends Entity {
   }
 
   pathToAdjacent(sim, tx, ty) {
-    return sim.pathfinder.findPath(
-      this.tileX(), this.tileY(),
-      (x, y) => sim.grid.isWalkable(x, y) && sim.grid.neighbors4(x, y).some(n => n.x === tx && n.y === ty),
+    // Goal = any walkable tile 4-adjacent to (tx,ty). Build that small set once
+    // and search straight to it — no full-grid heuristic scan, no per-visited-
+    // node neighbor test (this is the hottest pathfinding caller).
+    const targets = sim.grid.neighbors4(tx, ty).filter(n => sim.grid.isWalkable(n.x, n.y));
+    if (!targets.length) return null;
+    return sim.pathfinder.findPathToTargets(
+      this.tileX(), this.tileY(), targets,
       (x, y) => sim.grid.isWalkable(x, y));
   }
 
@@ -128,20 +132,20 @@ class Employee extends Entity {
       this.task = { order: o, stove };
       this.setPath(path); this.state = ES.TO_STOVE_PICKUP; return;
     }
-    // Priority 2: start cooking a pending order. Catapult stoves are tried
-    // first (they skip the deliver walk entirely, so they're always the
-    // better tool when free) — regular stoves are the fallback.
+    // Priority 2: start cooking a pending order on the NEAREST available stove
+    // (either type), chosen by actual walking distance — the shortest path among
+    // all reachable stoves wins. (On an exact tie the catapult, iterated first,
+    // is kept since it skips the deliver walk.)
     for (const o of sim.orders) {
       if (o.status !== 'pending' || o.cookingEmployee) continue;
       let chosenStove = null, chosenPath = null;
       for (const wantType of ['catapult_stove', 'stove']) {
-        for (const stove of sim.buildings) {
-          if (stove.type !== wantType || !stove.isAvailable()) continue;
+        for (const stove of sim.buildingsByType[wantType]) {
+          if (!stove.isAvailable()) continue;
           const path = this.pathToAdjacent(sim, stove.x, stove.y);
           if (!path) continue;
-          chosenStove = stove; chosenPath = path; break;
+          if (!chosenPath || path.length < chosenPath.length) { chosenStove = stove; chosenPath = path; }
         }
-        if (chosenStove) break;
       }
       if (!chosenStove) continue;
       o.cookingEmployee = this; o.assignedStove = chosenStove;
@@ -149,14 +153,17 @@ class Employee extends Entity {
       this.task = { order: o, stove: chosenStove };
       this.setPath(chosenPath); this.state = ES.TO_STOVE_COOK; return;
     }
-    // Priority 3: clear a dirty plate.
-    for (const b of sim.buildings) {
-      if (b.type !== 'table' || !b.plate || !b.plate.dirty || b.cleaningAssigned) continue;
+    // Priority 3: clear a dirty plate, using the sink NEAREST the dirty table
+    // (the chef carries the plate table→sink, so closeness to the table is what
+    // shortens that trip).
+    for (const b of sim.buildingsByType.table) {
+      if (!b.plate || !b.plate.dirty || b.cleaningAssigned) continue;
       if (b.occupyingCustomer) continue;
-      let chosenSink = null;
-      for (const s of sim.buildings) {
-        if (s.type !== 'sink' || !s.isAvailable()) continue;
-        chosenSink = s; break;
+      let chosenSink = null, bestSinkD = Infinity;
+      for (const s of sim.buildingsByType.sink) {
+        if (!s.isAvailable()) continue;
+        const d = Math.abs(s.x - b.x) + Math.abs(s.y - b.y);
+        if (d < bestSinkD) { bestSinkD = d; chosenSink = s; }
       }
       if (!chosenSink) continue;
       const path = this.pathToAdjacent(sim, b.x, b.y); if (!path) continue;

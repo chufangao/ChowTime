@@ -307,10 +307,43 @@ const EVENTS = [
       },
     ],
   },
+  {
+    id: 'room_grant', icon: '🏗️', title: 'Spare Room Offer',
+    flavor: 'The landlord offers to knock through to the empty space next door.',
+    choices: [
+      {
+        // Free grant: samples a random preset room config and queues it for the
+        // player to position with the Place Room tool. Mirrors the deferred
+        // freeBuildCredits pattern — we store the config *id* (stable across
+        // save/load) and look it up at placement time.
+        kind: 'pay', label: 'Take the room (free)',
+        cost: {},
+        onResolve: (sim) => {
+          const cfg = sim.grantRandomRoom();
+          if (!cfg) return { msg: 'No room available to grant right now.' };
+          return { msg: `New room: ${cfg.name}. Use the Add Room tool to place it.` };
+        },
+      },
+      {
+        kind: 'pay', label: 'Pass on it (free)',
+        cost: {},
+        onResolve: (sim) => ({ msg: 'Left the space empty for now.' }),
+      },
+    ],
+  },
 ];
 
+// Daily events minus the room grant — the grant is scheduled (every 3rd day),
+// not part of the random draw, so rooms arrive on a predictable cadence.
+const _RANDOM_DAILY_EVENTS = EVENTS.filter(e => e.id !== 'room_grant');
+
 function rollDailyEvent(day) {
-  return _rollFrom(EVENTS);
+  // Guaranteed room-expansion grant every 3rd day (day 3, 6, 9, …); otherwise
+  // a uniform pick from the rest of the catalog.
+  if (day && day % 3 === 0) {
+    return getDailyEventById('room_grant') || _rollFrom(_RANDOM_DAILY_EVENTS);
+  }
+  return _rollFrom(_RANDOM_DAILY_EVENTS);
 }
 
 // Look up a daily event by id (used by save/load).

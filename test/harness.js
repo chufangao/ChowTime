@@ -20,6 +20,7 @@ const path = require('node:path');
 const SRC_FILES = [
   'src/data/constants.js',
   'src/data/layouts.js',
+  'src/data/rooms.js',
   'src/data/layout_generator.js',
   'src/data/abilities.js',
   'src/data/events_forecasts.js',
@@ -94,10 +95,12 @@ function loadSim({ seed = 1 } = {}) {
   parts.push(`
     Object.assign(this, {
       // constants / data
-      COLS, ROWS, FOODS, FOOD_KEYS, CONFIG,
+      COLS, ROWS, GRID_COLS, GRID_ROWS, FOODS, FOOD_KEYS, CONFIG,
       ABILITIES, CUSTOMER_ABILITY_ROLL,
       EVENTS, FORECASTS, GIFTS, STARTER_CHEF, CHEF_ROSTER,
       LAYOUTS, validateLayout, pickRandomLayout, getLayoutById, applyLayout,
+      LAYOUT_STARTER_CHARS, LAYOUT_CHAR_STARTERS,
+      ROOM_CONFIGS, parseRoomConfigs, setRoomConfigs, getRoomConfigById, ROOMS_JSONL,
       generateLayout: (typeof generateLayout === 'function' ? generateLayout : null),
       // helpers
       clamp, computeQuality, computeTip,
@@ -119,6 +122,7 @@ function loadSim({ seed = 1 } = {}) {
       SellApp: (typeof SellApp === 'function' ? SellApp : null),
       RepairApp: (typeof RepairApp === 'function' ? RepairApp : null),
       RotateApp: (typeof RotateApp === 'function' ? RotateApp : null),
+      PlaceRoomApp: (typeof PlaceRoomApp === 'function' ? PlaceRoomApp : null),
       BuildApp: (typeof BuildApp === 'function' ? BuildApp : null),
       HireApp: (typeof HireApp === 'function' ? HireApp : null),
       SettingsApp: (typeof SettingsApp === 'function' ? SettingsApp : null),

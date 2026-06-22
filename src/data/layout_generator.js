@@ -713,7 +713,11 @@ function _blurbFor(kernelName, doors) {
 /* ---- Render to ASCII rows ------------------------------------------------ */
 
 function _renderRows(gapSet, doors, starters) {
-  const starterChar = { stove: 'S', sink: 'K', table: 'T', chair: 'C' };
+  // Reuse the shared legend from layouts.js (loaded first) so the type→char
+  // mapping stays in lockstep with _parseLayout's char→type mapping.
+  const starterChar = (typeof LAYOUT_STARTER_CHARS !== 'undefined')
+    ? LAYOUT_STARTER_CHARS
+    : { stove: 'S', sink: 'K', table: 'T', chair: 'C' };
   const rows = [];
   for (let y = 0; y < ROWS; y++) {
     let row = '';

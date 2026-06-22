@@ -24,7 +24,8 @@ class PreloadScene extends Phaser.Scene {
   preload() {
     // Real PNG/JSON atlases will land here once art exists. Until then, see
     // create() — we bake textures procedurally from the existing sprites.js
-    // drawing code.
+    // drawing code. (Room configs need no preload — they're authored in-code
+    // in src/data/rooms.js and parsed at script load.)
   }
 
   create() {

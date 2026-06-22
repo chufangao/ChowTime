@@ -177,6 +177,65 @@ class AssignApp extends MapToolApp {
   }
 }
 
+// Place Room: stamps a granted expansion-room config (floor + furniture) into
+// the void with a single click. A multi-tile ghost follows the cursor (drawn by
+// the scene) showing the furnished footprint + valid/invalid tint; the room is
+// never rotated (configs are placed as authored). The tool is hidden from the
+// bar unless a room grant is pending. Locked during service (a between-day
+// edit, like Move). Single-phase: no pickup state — the active config is just
+// the first pending grant.
+class PlaceRoomApp extends MapToolApp {
+  constructor() {
+    super({ id: 'place_room', icon: '🏗', title: 'Add Room' });
+    this.configId = null;
+  }
+
+  // The config currently being placed = the first pending grant. Re-read on
+  // open and on each click so it tracks the queue as rooms are placed.
+  _syncConfigId(sim) {
+    const s = sim || (this.manager && this.manager._sim);
+    this.configId = (s && s._pendingRooms && s._pendingRooms[0]) || null;
+    return this.configId;
+  }
+
+  _config() {
+    if (!this.configId || typeof ROOM_CONFIGS === 'undefined') return null;
+    return ROOM_CONFIGS.find(c => c.id === this.configId) || null;
+  }
+
+  onOpen() { this._syncConfigId(); }
+
+  onMapClick(sim, tile, _button) {
+    if (!tile) return;
+    if (!this.configId) this._syncConfigId(sim);
+    if (!this.configId) return;
+    const res = sim.placeRoom(this.configId, tile.x, tile.y);
+    if (res && res.ok) {
+      // Advance to the next pending grant; close the tool when none remain.
+      this._syncConfigId(sim);
+      if (!this.configId && this.manager) this.manager.close();
+    }
+  }
+
+  // Whole-room validity at anchor (x,y) — drives the ghost's valid/invalid tint.
+  isValidAt(sim, x, y) {
+    const cfg = this._config();
+    if (!cfg) return false;
+    return sim.roomPlacement(cfg, x, y).ok;
+  }
+
+  // Hidden from the top bar unless a room is waiting to be placed; the red dot
+  // fires whenever the queue is non-empty.
+  hiddenInBar(sim) { return !(sim && sim._pendingRooms && sim._pendingRooms.length); }
+  notification(sim) { return !!(sim && sim._pendingRooms && sim._pendingRooms.length); }
+
+  onDeactivate(_sim) { this.configId = null; }
+
+  describe() {
+    return Object.assign(super.describe(), { configId: this.configId });
+  }
+}
+
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { MapToolApp, MoveApp, SellApp, RepairApp, RotateApp, AssignApp };
+  module.exports = { MapToolApp, MoveApp, SellApp, RepairApp, RotateApp, AssignApp, PlaceRoomApp };
 }

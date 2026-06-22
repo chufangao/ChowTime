@@ -40,7 +40,34 @@ const WorldRenderer = (() => {
   const _buildingSprite   = new Map(); // id → Sprite
   const _buildingOverlay  = new Map(); // id → Graphics
   const _wallSprite       = new Map(); // "x,y" → Sprite
-  const _entityGraphics   = new Map(); // entity.id → Graphics  (customers + employees share id namespace via _eid)
+  // entity.id → { container, back: Graphics, sprite: Sprite|null, front: Graphics, key }
+  // The container holds the baked static-body Sprite between two Graphics
+  // (back = shadow+legs, front = face/hat/overlays) so z-order is insertion-
+  // stable while the Layer still y-sorts whole entities against buildings.
+  const _entityNode       = new Map();
+  // appearanceKey → baked texture key. One body texture per unique look.
+  const _charTexKey       = new Map();
+  let   _charTexSeq       = 0;
+  // Set true once a character bake fails / TextureBaker is unavailable; the
+  // renderer then falls back to the un-baked full per-frame Graphics draw.
+  let   _charBakeBroken   = false;
+  let   _CHAR_ORIGIN_X = 0.5;
+  let   _CHAR_ORIGIN_Y = 56 / 64;
+
+  // Reused per-frame "live key" sets — cleared each frame instead of
+  // reallocated, to keep the update loop allocation-free.
+  const _liveBuildings = new Set();
+  const _liveWalls     = new Set();
+  const _liveEntities  = new Set();
+  // Walls are tile state that changes rarely; grid.setType bumps floorVersion
+  // on any tile-type change (incl. walls), so we only rescan/reconcile walls
+  // when that counter moves rather than scanning the whole grid every frame.
+  let _lastWallVer = -1;
+  // The Layer only needs a y-sort when a child's screen-y changed or membership
+  // changed (entity/building added or removed). Reconcile sets this flag; update
+  // skips the O(N log N) sort on fully-static frames (dayEnd pause, everyone
+  // seated). Starts true so the first frame always sorts.
+  let _sortDirty = true;
 
   // Origin within a baked building texture so setPosition(sx, sy) places the
   // iso footprint at (sx, sy). Mirrors TextureBaker's anchor constants.
@@ -58,6 +85,11 @@ const WorldRenderer = (() => {
     if (typeof TextureBaker.getDisplayScale === 'function') {
       _BAKE_DISPLAY_SCALE = TextureBaker.getDisplayScale();
     }
+    if (typeof TextureBaker.getCharAnchor === 'function') {
+      const ca = TextureBaker.getCharAnchor();
+      _CHAR_ORIGIN_X = ca.sx / ca.w;
+      _CHAR_ORIGIN_Y = ca.sy / ca.h;
+    }
   }
 
   function attach(scene) {
@@ -69,6 +101,8 @@ const WorldRenderer = (() => {
     // by default — but we override it in scene.js to a higher value).
     _layer = scene.add.layer();
     _layer.setDepth(100);
+    _lastWallVer = -1;  // first update() paints all walls
+    _sortDirty = true;  // force a sort on the first frame after (re)attach
   }
 
   function detach() {
@@ -77,11 +111,13 @@ const WorldRenderer = (() => {
     for (const s of _buildingSprite.values())  s.destroy();
     for (const g of _buildingOverlay.values()) g.destroy();
     for (const s of _wallSprite.values())      s.destroy();
-    for (const g of _entityGraphics.values())  g.destroy();
+    for (const n of _entityNode.values())      n.container.destroy(true);
     _buildingSprite.clear();
     _buildingOverlay.clear();
     _wallSprite.clear();
-    _entityGraphics.clear();
+    _entityNode.clear();
+    _charTexKey.clear();
+    _lastWallVer = -1;  // force a wall repaint if the scene reattaches
     if (_layer) { _layer.destroy(); _layer = null; }
     _scene = null;
   }
@@ -132,10 +168,12 @@ const WorldRenderer = (() => {
       sprite.setScale(_BAKE_DISPLAY_SCALE);
       _layer.add(sprite);
       _buildingSprite.set(b.id, sprite);
+      _sortDirty = true;   // new child → re-sort
     } else if (sprite.texture && sprite.texture.key !== key) {
       // Chair facing changed (rotate / move / new adjacent table) — swap frame.
       if (_scene.textures.exists(key)) sprite.setTexture(key);
     }
+    if (sprite._ly !== layerY) { sprite._ly = layerY; _sortDirty = true; }   // y moved (move / bounce)
     sprite.setPosition(sx, layerY);
 
     // Overlay Graphics: drawn at LOCAL (0, 0) and offset via .position so its
@@ -146,13 +184,25 @@ const WorldRenderer = (() => {
       _layer.add(overlay);
       _buildingOverlay.set(b.id, overlay);
     }
+    // setPosition is cheap and must always run (placement bounce + Move), but
+    // the expensive clear()+redraw is gated: idle buildings (a non-broken
+    // chair, an empty table, an idle stove/sink) draw a static overlay once and
+    // then skip until their state changes. buildingOverlayState() — colocated
+    // with the *Overlay draws — says whether the overlay is animating and gives
+    // a signature of its static state. See sprites.js.
     overlay.setPosition(sx, layerY);
-    overlay.clear();
-    // getText is a scene-wide pool that takes ABSOLUTE coords, but Sprites.*
-    // are now called with local (0,0) so any text positions inside them are
-    // entity-local. Wrap getText to translate local → absolute.
-    const textAt = (k, s, lx, ly, st) => view.getText(k, s, sx + lx, layerY + ly, st);
-    _drawBuildingOverlay(overlay, b, view, textAt);
+    const ov = (Sprites.buildingOverlayState)
+      ? Sprites.buildingOverlayState(b, view.time)
+      : { animating: true, sig: null };
+    if (ov.animating || ov.sig !== overlay._ovSig) {
+      overlay.clear();
+      // getText is a scene-wide pool that takes ABSOLUTE coords, but Sprites.*
+      // are now called with local (0,0) so any text positions inside them are
+      // entity-local. Wrap getText to translate local → absolute.
+      const textAt = (k, s, lx, ly, st) => view.getText(k, s, sx + lx, layerY + ly, st);
+      _drawBuildingOverlay(overlay, b, view, textAt);
+      overlay._ovSig = ov.sig;
+    }
   }
 
   function _drawBuildingOverlay(g, b, view, textAt) {
@@ -191,27 +241,85 @@ const WorldRenderer = (() => {
 
   // --- Customers / Employees -----------------------------------------------
 
+  // Resolve (baking if needed) the static-body texture key for this entity's
+  // appearance. Returns null if baking is unavailable, signalling the caller to
+  // use the un-baked fallback draw.
+  function _charTextureFor(e, kind) {
+    // Debug escape hatch: window.__WR_NOBAKE forces the un-baked fallback draw
+    // so the baked vs legacy paths can be A/B compared in the same build.
+    if (typeof window !== 'undefined' && window.__WR_NOBAKE) return null;
+    if (_charBakeBroken || typeof TextureBaker === 'undefined' || !TextureBaker.bakeCharacter) {
+      _charBakeBroken = true; return null;
+    }
+    const appKey = (kind === 'customer') ? Sprites.customerAppearanceKey(e) : Sprites.employeeAppearanceKey(e);
+    let texKey = _charTexKey.get(appKey);
+    if (texKey) return texKey;
+    texKey = 'char_' + (_charTexSeq++);
+    const baseFn = (kind === 'customer') ? Sprites.customerBase : Sprites.employeeBase;
+    // Neutral stub: hasPath()=false zeroes bob/stride so the body bakes at rest.
+    const stub = (kind === 'customer')
+      ? { bodyColor: e.bodyColor, skinColor: e.skinColor, hairColor: e.hairColor, hasHair: e.hasHair, hat: e.hat, id: 0, hasPath: () => false }
+      : { skinColor: e.skinColor, visual: e.visual, id: 0, hasPath: () => false };
+    // bakeCharacter calls drawFn(stubView, ax, ay) with ax/ay at the in-texture
+    // footprint anchor; draw the base there so the sprite origin lines up.
+    const ok = TextureBaker.bakeCharacter(_scene, texKey, (sv, ax, ay) => baseFn(sv, stub, ax, ay));
+    if (!ok) { _charBakeBroken = true; return null; }
+    _charTexKey.set(appKey, texKey);
+    return texKey;
+  }
+
   function _reconcileEntity(e, kind, view) {
     const { sx, sy } = gridToScreen(e.x, e.y);
-    let g = _entityGraphics.get(e.id);
-    if (!g) {
-      g = _scene.add.graphics();
-      _layer.add(g);
-      _entityGraphics.set(e.id, g);
+    let node = _entityNode.get(e.id);
+    if (!node) {
+      const container = _scene.add.container(sx, sy);
+      const back  = _scene.add.graphics();
+      const front = _scene.add.graphics();
+      // Insertion order = render order inside the container: back, (sprite), front.
+      container.add(back);
+      container.add(front);
+      _layer.add(container);
+      node = { container, back, front, sprite: null, key: null, ly: null };
+      _entityNode.set(e.id, node);
+      _sortDirty = true;   // new child → re-sort
     }
-    g.setPosition(sx, sy);
-    g.clear();
-    // Drive the full per-frame draw with a view that routes both g + overlay
-    // to this entity's Graphics. Overlays (speech bubbles, anger bars) end
-    // up on the same layer y as the body, which y-sorts correctly with the
-    // rest of the world. The text pool, however, takes ABSOLUTE scene coords
-    // — wrap getText so local (lx, ly) calls inside Sprites.* land at the
-    // entity's world position. Without this, food-icon bubbles, broken ⚠,
-    // etc. would all stack at the canvas origin.
+    if (node.ly !== sy) { node.ly = sy; _sortDirty = true; }   // entity moved in screen-y
+    node.container.setPosition(sx, sy);
+    node.container.y = sy;  // explicit: Layer.sort('y') reads container.y
+
+    // Wrap the text pool so local (lx, ly) lands at the entity's world position.
     const textAt = (k, s, lx, ly, st) => view.getText(k, s, sx + lx, sy + ly, st);
-    const localView = { g, overlay: g, time: view.time, grid: view.grid, getText: textAt };
-    if (kind === 'customer')      Sprites.customer(localView, e, 0, 0);
-    else if (kind === 'employee') Sprites.employee(localView, e, 0, 0);
+
+    const texKey = _charTextureFor(e, kind);
+    if (texKey) {
+      // Baked body sprite between back/front, offset up by the walk bob.
+      const bob = Sprites.entityBob(e, view.time, kind === 'employee');
+      if (!node.sprite || node.key !== texKey) {
+        if (node.sprite) node.sprite.destroy();
+        node.sprite = _scene.add.sprite(0, 0, texKey);
+        node.sprite.setOrigin(_CHAR_ORIGIN_X, _CHAR_ORIGIN_Y);
+        node.sprite.setScale(_BAKE_DISPLAY_SCALE);
+        // Keep z-order back < sprite < front.
+        node.container.addAt(node.sprite, 1);
+        node.key = texKey;
+      }
+      node.sprite.setPosition(0, -bob);
+      const backView  = { g: node.back,  overlay: node.back,  time: view.time, grid: view.grid, getText: textAt };
+      const frontView = { g: node.front, overlay: node.front, time: view.time, grid: view.grid, getText: textAt };
+      node.back.clear();
+      node.front.clear();
+      if (kind === 'customer') { Sprites.customerBack(backView, e, 0, 0); Sprites.customerFront(frontView, e, 0, 0); }
+      else                     { Sprites.employeeBack(backView, e, 0, 0); Sprites.employeeFront(frontView, e, 0, 0); }
+    } else {
+      // Fallback: no baking — draw the whole body into the back Graphics each
+      // frame (front stays empty), preserving the original look.
+      if (node.sprite) { node.sprite.destroy(); node.sprite = null; node.key = null; }
+      const localView = { g: node.back, overlay: node.back, time: view.time, grid: view.grid, getText: textAt };
+      node.back.clear();
+      node.front.clear();
+      if (kind === 'customer')      Sprites.customer(localView, e, 0, 0);
+      else if (kind === 'employee') Sprites.employee(localView, e, 0, 0);
+    }
   }
 
   // --- Reconciliation helpers ----------------------------------------------
@@ -221,6 +329,7 @@ const WorldRenderer = (() => {
       if (validKeys.has(key)) continue;
       obj.destroy();
       map.delete(key);
+      _sortDirty = true;   // membership shrank → re-sort
     }
   }
 
@@ -230,42 +339,56 @@ const WorldRenderer = (() => {
     if (!_scene || !_layer) return;
 
     // Buildings
-    const liveBuildings = new Set();
+    _liveBuildings.clear();
     for (const b of sim.buildings) {
-      liveBuildings.add(b.id);
+      _liveBuildings.add(b.id);
       _reconcileBuilding(b, view);
     }
-    _pruneMissing(_buildingSprite,  liveBuildings);
-    _pruneMissing(_buildingOverlay, liveBuildings);
+    _pruneMissing(_buildingSprite,  _liveBuildings);
+    _pruneMissing(_buildingOverlay, _liveBuildings);
 
     // Walls — keyed by (x, y) since they're tile state, not entity instances.
-    const liveWalls = new Set();
-    for (let gy = 0; gy < sim.grid.rows; gy++) {
-      for (let gx = 0; gx < sim.grid.cols; gx++) {
-        const t = sim.grid.tiles[gy][gx];
-        if (!t || t.type !== 'wall') continue;
-        const k = _wallKey(gx, gy);
-        liveWalls.add(k);
-        _reconcileWall(gx, gy, t.wallKind || 'player');
+    // Only rescan when the grid actually changed (a wall placed/removed bumps
+    // floorVersion); otherwise the existing wall Sprites are already correct.
+    const wallVer = sim.grid.floorVersion;
+    if (wallVer !== _lastWallVer) {
+      _lastWallVer = wallVer;
+      _sortDirty = true;   // walls changed → re-sort
+      _liveWalls.clear();
+      for (let gy = 0; gy < sim.grid.rows; gy++) {
+        for (let gx = 0; gx < sim.grid.cols; gx++) {
+          const t = sim.grid.tiles[gy][gx];
+          if (!t || t.type !== 'wall') continue;
+          const k = _wallKey(gx, gy);
+          _liveWalls.add(k);
+          _reconcileWall(gx, gy, t.wallKind || 'player');
+        }
       }
+      _pruneMissing(_wallSprite, _liveWalls);
     }
-    _pruneMissing(_wallSprite, liveWalls);
 
     // Customers + employees share the _eid namespace from customer.js, so a
     // single map across both is safe.
-    const liveEntities = new Set();
+    _liveEntities.clear();
     for (const c of sim.customers) {
-      liveEntities.add(c.id);
+      _liveEntities.add(c.id);
       _reconcileEntity(c, 'customer', view);
     }
     for (const e of sim.employees) {
-      liveEntities.add(e.id);
+      _liveEntities.add(e.id);
       _reconcileEntity(e, 'employee', view);
     }
-    _pruneMissing(_entityGraphics, liveEntities);
+    for (const [id, node] of _entityNode.entries()) {
+      if (_liveEntities.has(id)) continue;
+      node.container.destroy(true);   // destroys back/front Graphics + sprite child
+      _entityNode.delete(id);
+      _sortDirty = true;   // entity left → re-sort
+    }
 
     // Sort the layer by y so taller-y children (closer to camera) draw on top.
-    _layer.sort('y');
+    // Skipped on fully-static frames (nothing moved, no membership change) —
+    // saves the O(N log N) sort during pauses and when everyone is seated.
+    if (_sortDirty) { _layer.sort('y'); _sortDirty = false; }
   }
 
   return { attach, detach, update };
